@@ -16,13 +16,13 @@ Where will this app run?
 
 ### Q2 — Which providers to launch with?
 Which STT providers should be included in v1? (check all that apply)
-- [ ] Eleven Labs Scribe v2 (WebSocket, ~150ms latency)
-- [ ] Gemini Live API (WebSocket, multimodal)
-- [ ] Google Cloud Speech-to-Text (gRPC/WebSocket)
-- [ ] Soniox (WebSocket)
-- [ ] Gladia (WebSocket)
-- [ ] OpenAI Whisper (async/batch only)
-- [ ] All of the above
+- [x] Eleven Labs Scribe v2 (WebSocket, ~150ms latency) — **Real-time only**
+- [x] Gemini Live API (WebSocket, multimodal) — **Real-time only**
+- [x] Google Cloud Speech-to-Text (WebSocket) — **Real-time only**
+- [x] Soniox (WebSocket) — **Real-time only**
+- [x] OpenAI Whisper (async/batch only) — **Async only**
+
+**Note:** Gladia removed for simplicity. Real-time limited to 4 providers for 2×2 grid layout.
 
 ### Q3 — Auth / API key management
 How should API keys be handled?
@@ -35,33 +35,23 @@ How should API keys be handled?
 - [ ] Supabase Auth — users sign up, keys and history saved to their account
 - [ ] Single password / magic-link for private team access
 
-### Q5 — Comparison mode
-Should users be able to run multiple providers simultaneously on the same audio for side-by-side comparison?
-- [ ] Yes — side-by-side panels, same microphone feed split to all selected providers
-- [ ] No — one provider at a time, switchable via a dropdown
-
-### Q6 — Async / file upload mode
-Beyond real-time microphone streaming, should the app also accept file uploads for batch transcription?
-- [ ] Yes — support both mic streaming and audio file upload
-- [ ] No — microphone / real-time only
-
-### Q7 — Visual style
+### Q5 — Visual style
 - [ ] Dark-mode technical dashboard (think Vercel / Linear)
 - [ ] Clean light SaaS (think Notion / Linear light)
 - [ ] Minimal hacker terminal aesthetic
 - [ ] No preference — Lovable decides
 
-### Q8 — Languages / locales
+### Q6 — Languages / locales
 - [ ] English only for UI and transcription demos
 - [ ] Multi-language: UI in English, but transcription demo should support selecting a target language per provider
 
-### Q9 — Metrics & benchmarking
+### Q7 — Metrics & benchmarking
 Should the app display live latency, word error rate estimates, or cost-per-minute comparisons?
 - [ ] Yes — show latency badge per provider, cost table
 - [ ] Latency only (no cost info)
 - [ ] No metrics — clean transcription view only
 
-### Q10 — Export / history
+### Q8 — Export / history
 - [ ] Save transcription sessions to browser localStorage
 - [ ] Save to Supabase (requires auth)
 - [ ] No saving — session only
@@ -72,59 +62,115 @@ Should the app display live latency, word error rate estimates, or cost-per-minu
 
 **Product name:** STT Demo Platform (working title)
 
-**One-liner:** A browser-based playground to compare the world's best real-time Speech-to-Text APIs — side by side, live from your microphone.
+**One-liner:** A browser-based arena to benchmark Speech-to-Text APIs — choose your mode: live 4-way real-time comparison from your mic, or batch async transcription via file upload.
 
 **Target user:** Developers and product teams evaluating STT providers for their products.
 
-**Core value prop:** Instead of reading docs for five different providers, users can speak once and see all transcriptions appear in real time, with latency and quality visible at a glance.
+**Core value prop:**
+- **Real-time mode:** Speak once, see 4 providers transcribe simultaneously in a 2×2 grid with live latency badges.
+- **Async mode:** Upload an audio file and watch Whisper process it with detailed analytics.
 
 ---
 
 ## Screens & Features
 
 ### 1. Home / Landing
-- Hero: single headline, one CTA ("Start Demo")
-- Brief provider logo strip (Eleven Labs, Google, Gemini, Soniox, Gladia, OpenAI)
+- Hero: single headline, one CTA ("Choose Your Mode")
+- Two large buttons:
+  - **Real-time Arena** — "4-way live transcription from your mic"
+  - **Async Batch** — "Upload audio, get detailed transcription"
+- Brief provider logos (Eleven Labs, Google, Gemini, Soniox for real-time; Whisper for async)
 - No login wall by default (see Q4)
 
-### 2. Demo Playground (main screen)
-**Layout:** Split into a control panel (left/top) and transcription panels (right/main)
+---
 
-**Control Panel contains:**
-- Provider selector — checkboxes or multi-select chips for each STT provider
-- Language selector (if Q8 = multi-language)
-- Record button (large, prominent) — starts/stops microphone capture
-- File upload dropzone (if Q6 = yes)
-- Settings gear → opens API key modal (if Q3 = client-side keys)
+### 2a. Real-Time Arena (Main screen — Mode: Live)
 
-**Transcription Panels:**
-- One panel per selected provider, rendered in a responsive grid (2-col on desktop, stacked on mobile)
-- Each panel shows:
-  - Provider name + logo
-  - Live transcript text (streaming, words appear as spoken)
-  - Status indicator: Connecting / Live / Error
-  - Latency badge (ms, updated per response chunk) — if Q9 includes latency
-  - Copy transcript button
-  - Clear button
+**Header:**
+- Mode toggle: [Real-time Arena] [Async Batch] (hard switch, resets the session)
+- Settings gear → opens API key modal
 
-**Comparison bar (if Q5 = side-by-side):**
-- Bottom summary row: which provider produced the most words, lowest latency
+**Control Panel (top bar):**
+- **Provider selector:** 4 large toggle buttons, one per real-time provider (Eleven Labs, Gemini, Google Cloud, Soniox)
+  - All start **enabled** by default
+  - Toggling off removes that provider's panel
+  - Cannot disable all — at least one must remain active
+- Language selector (if Q6 = multi-language)
+- **Record button:** Large, centered, dominant
+  - Text: "🔴 START" (recording) or "⏹️ STOP" (idle)
+  - On click: toggles microphone capture and broadcasts to all enabled providers
+
+**Transcription Arena (2×2 grid):**
+- Exactly 4 panels, one per provider in fixed positions (top-left, top-right, bottom-left, bottom-right)
+- Each panel contains:
+  - Provider name + logo (header)
+  - Large live transcript text (words stream in as spoken, left-aligned)
+  - Status indicator badge: Connecting / Live / Error
+  - **Latency badge** (bottom-right): updates per chunk (e.g. "145ms") — if Q7 includes latency
+  - Copy transcript button (bottom bar)
+  - Clear button (bottom bar)
+  - Error overlay (if provider fails) — shows error message, "retry" button, or "check API key" link
+
+**Bottom Comparison Bar:**
+- Real-time summary: Word count per provider, lowest latency provider, error count
+- Updated every 2 seconds
+
+---
+
+### 2b. Async Batch (Main screen — Mode: Batch)
+
+**Completely different layout from real-time.**
+
+**Header:**
+- Mode toggle: [Real-time Arena] [Async Batch] (hard switch, resets the session)
+- Settings gear → opens API key modal
+
+**Upload Zone (center, full-width prominent box):**
+- Large drag-and-drop zone: "Drop audio file here or click to upload"
+- Supported formats: `.mp3`, `.wav`, `.m4a`, `.ogg`, `.flac`
+- Max file size: 25MB
+- Language selector (if Q6 = multi-language) above the upload zone
+
+**Processing State:**
+- Once file is selected/uploaded, show:
+  - File name + size
+  - Progress bar (0–100%)
+  - Status text: "Uploading...", "Processing...", "Done"
+  - Cancel button (while processing)
+
+**Result Panel (after processing):**
+- Full-width text result
+- Transcript displayed in large, readable font
+- Copy button + Export as `.txt` / `.json` buttons
+- Metadata: File name, duration, language, processing time
+- Retry button (if user wants to re-process with different settings)
+
+**Visual difference:** Async is **minimal, focused, single-column**. Real-time is **multi-column grid, constant streaming**.
+
+---
 
 ### 3. Settings / API Keys Modal
-- Text inputs for each provider's API key
+- Text inputs for each provider's API key:
+  - Real-time providers: Eleven Labs, Gemini, Google Cloud, Soniox
+  - Async provider: OpenAI (for Whisper)
 - Keys stored in localStorage (encrypted) or Supabase Vault (see Q3)
 - "Test connection" button per provider
 - Link to each provider's free-tier signup
 
-### 4. History Panel (if Q10 = save sessions)
-- List of past sessions with timestamp, provider used, first 100 chars of transcript
+---
+
+### 4. History Panel (if Q8 = save sessions)
+- List of past sessions with timestamp, mode (Real-time / Async), provider(s) used, first 100 chars of transcript
 - Click to expand full transcript
 - Export as `.txt` or `.json`
 
-### 5. Metrics / Benchmarks Page (if Q9 = yes)
+---
+
+### 5. Metrics / Benchmarks Page (if Q7 = yes)
 - Static comparison table: latency, cost per minute, language count, features
 - Data sourced from the research doc (can be hardcoded initially)
-- "Live benchmark" button: runs a standard 30-second test audio through all providers and plots results
+- **Real-time benchmark:** 4-way side-by-side latency comparison
+- **Async benchmark:** Whisper processing time + accuracy metrics
 
 ---
 
@@ -133,30 +179,44 @@ Should the app display live latency, word error rate estimates, or cost-per-minu
 ### Frontend
 - **Framework:** React + TypeScript (Lovable default)
 - **Styling:** Tailwind CSS + shadcn/ui components
-- **State:** React Context or Zustand for global provider/session state
-- **Audio capture:** Web Audio API + `MediaRecorder` / `AudioWorklet` for PCM capture
-- **WebSocket clients:** One hook per provider (`useElevenLabsSTT`, `useGeminiLive`, etc.)
+- **State:** React Context or Zustand for:
+  - Global app mode (real-time vs async)
+  - Active providers in each mode
+  - Current session transcript + metadata
+  - Provider connection status + latency
+- **Audio capture:** Web Audio API + `MediaRecorder` / `AudioWorklet` for PCM capture (real-time mode only)
+- **WebSocket clients:** One hook per real-time provider (`useElevenLabsSTT`, `useGeminiLive`, `useGoogleCloudSTT`, `useSoniox`)
+- **Async client:** One hook for Whisper (`useWhisperAsync`)
+- **Mode switching:** Hard reset on mode change (disconnect all WebSockets, clear transcript, reset state)
 
-### Audio Pipeline
+### Audio Pipeline (Real-Time Mode Only)
 ```
 Microphone
   → getUserMedia()
   → AudioWorklet (resample to 16kHz PCM 16-bit mono)
-  → Broadcast to all active provider WebSocket connections
+  → Broadcast to all 4 active provider WebSocket connections simultaneously
 ```
 
-**Key constraint:** All providers require **PCM 16-bit, 16kHz mono**. The AudioWorklet resampler should handle this normalization once, upstream of all provider connections.
+**Key constraint:** All real-time providers require **PCM 16-bit, 16kHz mono**. The AudioWorklet resampler should normalize once, upstream of all WebSocket connections.
+
+**Async mode:** File upload → read entire file as ArrayBuffer → send to Whisper REST API in one request.
 
 ### Provider Integration Details
+
+#### Real-Time Providers (WebSocket, Streaming)
 
 | Provider | Protocol | Endpoint | Notes |
 |---|---|---|---|
 | Eleven Labs Scribe v2 | WebSocket | `wss://api.elevenlabs.io/v1/speech-to-text/realtime` | Auth via `xi-api-key` header |
 | Gemini Live API | WebSocket | Google AI SDK (`@google/genai`) | Uses `BidiGenerateContent` stream |
-| Google Cloud STT | WebSocket / gRPC-web | `wss://speech.googleapis.com/...` | May need backend proxy for gRPC |
+| Google Cloud Speech-to-Text | WebSocket | `wss://speech.googleapis.com/...` | gRPC-web compatible |
 | Soniox | WebSocket | `wss://api.soniox.com/transcribe-websocket` | Auth via token in first message |
-| Gladia | WebSocket | Gladia SDK | Init via REST, then WebSocket |
-| OpenAI Whisper | REST / fetch | `https://api.openai.com/v1/audio/transcriptions` | Async only — send chunks on stop |
+
+#### Async Provider (REST, File-based)
+
+| Provider | Protocol | Endpoint | Notes |
+|---|---|---|---|
+| OpenAI Whisper | REST / fetch | `https://api.openai.com/v1/audio/transcriptions` | Async only — send audio file after selection |
 
 ### Backend (if Q1 requires it)
 - **Supabase Edge Functions** — proxy API calls, hide keys server-side
@@ -168,24 +228,32 @@ Microphone
 ## Data Models
 
 ```typescript
-// Session
+// App State
+interface AppState {
+  mode: 'realtime' | 'async';  // Hard switch between modes
+  currentSession?: TranscriptionSession;
+}
+
+// Session (Real-Time)
 interface TranscriptionSession {
   id: string;
+  mode: 'realtime' | 'async';
   startedAt: Date;
   endedAt?: Date;
   providers: ProviderResult[];
 }
 
-// Per-provider result
+// Per-provider result (Real-Time: 4 active; Async: Whisper only)
 interface ProviderResult {
-  provider: 'elevenlabs' | 'gemini' | 'google' | 'soniox' | 'gladia' | 'whisper';
+  provider: 'elevenlabs' | 'gemini' | 'google' | 'soniox' | 'whisper';
   transcript: TranscriptChunk[];
-  latencyMs: number[];  // one per chunk
+  latencyMs: number[];  // one per chunk (real-time) or null (async)
   status: 'connecting' | 'live' | 'done' | 'error';
   error?: string;
+  processingTimeMs?: number;  // async mode only
 }
 
-// Transcript chunk (streaming word/sentence)
+// Transcript chunk (streaming word/sentence in real-time, full text in async)
 interface TranscriptChunk {
   text: string;
   isFinal: boolean;
@@ -197,35 +265,41 @@ interface TranscriptChunk {
 
 ## Non-Functional Requirements
 
-- **Browser support:** Chrome 110+, Edge 110+, Firefox 120+ (Web Audio API required)
-- **Mobile:** Responsive layout, mic access works on iOS Safari 16.4+
+- **Browser support:** Chrome 110+, Edge 110+, Firefox 120+ (Web Audio API required for real-time; standard fetch for async)
+- **Mobile:** Responsive layout, mic access works on iOS Safari 16.4+ (real-time mode)
 - **No audio stored server-side** — audio bytes only travel from browser to provider APIs directly (client-side mode) or through ephemeral Edge Function (backend mode)
-- **Error handling:** Clear error state in each panel if a provider fails (bad key, quota exceeded, network drop) — never crash the whole app
-- **Accessibility:** Keyboard navigable record button, ARIA labels on live transcript regions (`aria-live="polite"`)
+- **Mode isolation:** Switching modes must reset all state, disconnect all WebSockets, clear transcript
+- **Error handling:** Clear error state in each provider panel if it fails (bad key, quota exceeded, network drop) — never crash the whole app. In async mode, Whisper failure is blocking (show error, offer retry).
+- **Accessibility:** Keyboard navigable record button (real-time), ARIA labels on live transcript regions (`aria-live="polite"`), file input accessible in async mode
 
 ---
 
 ## Nice-to-Haves (Post-v1)
 
-- Speaker diarization visualization (Eleven Labs supports this)
-- Word-level highlight synchronized to audio playback
+- Speaker diarization visualization in real-time (Eleven Labs supports this)
+- Word-level timestamps + audio playback sync (real-time mode)
 - Shareable session links (public transcript URLs)
-- Export to SRT subtitle format
-- Custom vocabulary input per provider
+- Export to SRT subtitle format (async mode)
+- Custom vocabulary per provider (real-time mode)
+- Confidence scores per word in async mode
+- Side-by-side mode comparison table (latency, word count, error rate)
 
 ---
 
 ## Reference Research
 
-The following providers have been validated as supporting real-time audio input via WebSocket:
+### Real-Time Providers (4-way Arena)
+The following providers support real-time audio input via WebSocket:
 
 - **Eleven Labs Scribe v2** — ~150ms latency, 90+ languages, speaker diarization
 - **Gemini Live API** — multimodal, VAD built-in, returns text + audio
-- **Google Cloud STT** — 125+ languages, most mature API
-- **Soniox** — enterprise accuracy, custom vocabulary
-- **Gladia** — word-level timestamps, async + real-time
+- **Google Cloud Speech-to-Text** — 125+ languages, most mature API, ~200ms latency
+- **Soniox** — enterprise accuracy, custom vocabulary, ~300ms latency
 
-Common audio standard across all providers: **PCM 16-bit, 16kHz, mono**.
+**Audio standard:** PCM 16-bit, 16kHz, mono
+
+### Async Provider
+- **OpenAI Whisper** — REST API, batch processing, ~99% accuracy on English, supports 99+ languages
 
 ---
 
@@ -235,9 +309,24 @@ Once you've filled in your answers, prepend the following to this file and paste
 
 ```
 Build a React + TypeScript + Tailwind + shadcn/ui app using the spec below.
-Scaffold all screens, provider WebSocket hooks, the AudioWorklet resampler pipeline,
-and wire up the UI. Use placeholder API calls where real provider keys are needed.
-Follow the data models exactly. Prioritize the Demo Playground screen first.
+
+This is a dual-mode STT benchmarking platform:
+
+1. **Real-Time Arena:** 4-way live transcription in a 2×2 grid from the user's microphone.
+   Scaffold WebSocket hooks for Eleven Labs, Gemini, Google Cloud STT, and Soniox.
+   Implement the AudioWorklet resampler to broadcast PCM 16-bit 16kHz mono to all 4 simultaneously.
+   Show live latency badges and transcript streaming.
+
+2. **Async Batch:** Single file upload to OpenAI Whisper.
+   Completely different layout from real-time — minimal, centered, single-column.
+   Show processing progress and full transcript result.
+
+Scaffold all screens, both modes, all provider hooks, the AudioWorklet pipeline, and wire up the UI.
+Use placeholder API calls where real provider keys are needed.
+Follow the data models exactly.
+
+MODE SWITCHING: Hard reset on mode change (disconnect WebSockets, clear state, fresh session).
+Modes should look completely different visually.
 
 [PASTE REST OF THIS DOCUMENT]
 ```
