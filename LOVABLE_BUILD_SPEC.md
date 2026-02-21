@@ -16,13 +16,13 @@ Where will this app run?
 
 ### Q2 — Which providers to launch with?
 Which STT providers should be included in v1? (check all that apply)
-- [x] Eleven Labs Scribe v2 (WebSocket, ~150ms latency) — **Real-time only**
-- [x] Gemini Live API (WebSocket, multimodal) — **Real-time only**
-- [x] Google Cloud Speech-to-Text (WebSocket) — **Real-time only**
-- [x] Soniox (WebSocket) — **Real-time only**
-- [x] OpenAI Whisper (async/batch only) — **Async only**
+- [x] Eleven Labs Scribe v2 (WebSocket for real-time, REST for async)
+- [x] Gemini Live API (WebSocket for real-time, REST for async)
+- [x] Google Cloud Speech-to-Text (WebSocket for real-time, REST for async)
+- [x] Soniox (WebSocket for real-time, REST for async)
+- [x] OpenAI Whisper (REST for async, can be used in real-time with chunked streaming)
 
-**Note:** Gladia removed for simplicity. Real-time limited to 4 providers for 2×2 grid layout.
+**Note:** All 5 providers work in BOTH modes. Real-time UI is a 2×2 grid (4 panels max), async is also 2×2 grid (4 panels max) for consistency. New providers can be added via config objects without UI changes.
 
 ### Q3 — Auth / API key management
 How should API keys be handled?
@@ -62,13 +62,15 @@ Should the app display live latency, word error rate estimates, or cost-per-minu
 
 **Product name:** STT Demo Platform (working title)
 
-**One-liner:** A browser-based arena to benchmark Speech-to-Text APIs — choose your mode: live 4-way real-time comparison from your mic, or batch async transcription via file upload.
+**One-liner:** A browser-based arena to benchmark Speech-to-Text APIs — pick any providers, pick any mode (real-time or async), compare side-by-side in a flexible 2×2 grid.
 
 **Target user:** Developers and product teams evaluating STT providers for their products.
 
 **Core value prop:**
-- **Real-time mode:** Speak once, see 4 providers transcribe simultaneously in a 2×2 grid with live latency badges.
-- **Async mode:** Upload an audio file and watch Whisper process it with detailed analytics.
+- **Flexible provider selection:** Choose any 4 providers from the library (Eleven Labs, Gemini, Google, Soniox, Whisper)
+- **Real-time mode:** Speak into your mic, see all selected providers transcribe simultaneously with live latency badges
+- **Async mode:** Upload an audio file, watch all selected providers process it in parallel with detailed metrics
+- **Scalable architecture:** Easy to add new providers without UI changes
 
 ---
 
@@ -91,21 +93,23 @@ Should the app display live latency, word error rate estimates, or cost-per-minu
 - Settings gear → opens API key modal
 
 **Control Panel (top bar):**
-- **Provider selector:** 4 large toggle buttons, one per real-time provider (Eleven Labs, Gemini, Google Cloud, Soniox)
-  - All start **enabled** by default
-  - Toggling off removes that provider's panel
-  - Cannot disable all — at least one must remain active
 - Language selector (if Q6 = multi-language)
 - **Record button:** Large, centered, dominant
   - Text: "🔴 START" (recording) or "⏹️ STOP" (idle)
-  - On click: toggles microphone capture and broadcasts to all enabled providers
+  - On click: toggles microphone capture and broadcasts to all selected providers
 
 **Transcription Arena (2×2 grid):**
-- Exactly 4 panels, one per provider in fixed positions (top-left, top-right, bottom-left, bottom-right)
+- Exactly 4 panels in fixed positions (top-left, top-right, bottom-left, bottom-right)
+- Each panel **header has a dropdown** to select which provider to use
+  - Default: panels pre-fill with [Eleven Labs, Gemini, Google Cloud, Soniox] but users can change any
+  - Dropdown shows all available providers (5 options: Eleven Labs, Gemini, Google Cloud, Soniox, Whisper)
+  - Same provider can be selected in multiple panels (for testing different settings)
+  - Clearing a panel = selecting "None" from dropdown
 - Each panel contains:
-  - Provider name + logo (header)
+  - **Provider selector dropdown** (in header)
+  - Provider logo (changes when dropdown selection changes)
   - Large live transcript text (words stream in as spoken, left-aligned)
-  - Status indicator badge: Connecting / Live / Error
+  - Status indicator badge: Connecting / Live / Error / None
   - **Latency badge** (bottom-right): updates per chunk (e.g. "145ms") — if Q7 includes latency
   - Copy transcript button (bottom bar)
   - Clear button (bottom bar)
@@ -125,37 +129,45 @@ Should the app display live latency, word error rate estimates, or cost-per-minu
 - Mode toggle: [Real-time Arena] [Async Batch] (hard switch, resets the session)
 - Settings gear → opens API key modal
 
-**Upload Zone (center, full-width prominent box):**
+**Upload Zone (top, full-width prominent box):**
 - Large drag-and-drop zone: "Drop audio file here or click to upload"
 - Supported formats: `.mp3`, `.wav`, `.m4a`, `.ogg`, `.flac`
 - Max file size: 25MB
-- Language selector (if Q6 = multi-language) above the upload zone
+- Language selector (if Q6 = multi-language) next to upload zone
 
-**Processing State:**
-- Once file is selected/uploaded, show:
-  - File name + size
-  - Progress bar (0–100%)
+**Provider Selection (below upload zone):**
+- **2×2 grid of provider selector dropdowns** (same layout as real-time, but for async)
+  - Each dropdown allows user to pick which provider to send the file to
+  - Default: [Eleven Labs, Gemini, Google Cloud, Soniox] (but can swap for Whisper or leave empty)
+  - Selecting same provider multiple times = batch multiple requests
+
+**Processing State (after file upload):**
+- One **result panel per selected provider**, in the 2×2 grid
+- Each panel shows:
+  - Provider name + logo (header)
+  - Progress bar (0–100%) while processing
   - Status text: "Uploading...", "Processing...", "Done"
-  - Cancel button (while processing)
+  - File name + size
+  - Estimated time remaining (if API provides it)
 
-**Result Panel (after processing):**
-- Full-width text result
-- Transcript displayed in large, readable font
+**Result Panel (after processing complete):**
+- Full transcript displayed in large, readable font
 - Copy button + Export as `.txt` / `.json` buttons
-- Metadata: File name, duration, language, processing time
+- Metadata: Processing time, file duration, language, word count
 - Retry button (if user wants to re-process with different settings)
+- Error state: If provider fails, show error message + "retry" link
 
-**Visual difference:** Async is **minimal, focused, single-column**. Real-time is **multi-column grid, constant streaming**.
+**Visual difference:** Async grid is **processing-focused**. Real-time is **streaming-focused**. Both use same 2×2 grid for consistency.
 
 ---
 
 ### 3. Settings / API Keys Modal
-- Text inputs for each provider's API key:
-  - Real-time providers: Eleven Labs, Gemini, Google Cloud, Soniox
-  - Async provider: OpenAI (for Whisper)
+- **Dynamic provider list:** Rendered from provider registry (scalable for new providers)
+- Text inputs for each provider's API key (loaded from registry)
 - Keys stored in localStorage (encrypted) or Supabase Vault (see Q3)
-- "Test connection" button per provider
-- Link to each provider's free-tier signup
+- "Test connection" button per provider (tests both real-time and async endpoints if applicable)
+- Link to each provider's free-tier signup (loaded from provider config)
+- Status indicator: ✓ Connected / ✗ Invalid key / ⚠ Not configured
 
 ---
 
@@ -181,12 +193,18 @@ Should the app display live latency, word error rate estimates, or cost-per-minu
 - **Styling:** Tailwind CSS + shadcn/ui components
 - **State:** React Context or Zustand for:
   - Global app mode (real-time vs async)
-  - Active providers in each mode
-  - Current session transcript + metadata
+  - Provider selections per panel (2×2 grid)
+  - Current session transcript + metadata per provider
   - Provider connection status + latency
+  - Available providers (config array, extensible)
+
+**Provider-Agnostic Architecture (scalability):**
+- **Provider registry:** Centralized config object listing all available providers with endpoints, auth, languages
+- **Generic provider hooks:** `useRealtimeProvider(providerId)` and `useAsyncProvider(providerId)` instead of provider-specific hooks
+  - These hooks automatically select the right endpoint (WebSocket for real-time, REST for async)
+  - Same hook logic for any new provider without code changes
+- **Panel component:** Generic `<TranscriptionPanel>` that accepts a `providerId` prop and auto-configures
 - **Audio capture:** Web Audio API + `MediaRecorder` / `AudioWorklet` for PCM capture (real-time mode only)
-- **WebSocket clients:** One hook per real-time provider (`useElevenLabsSTT`, `useGeminiLive`, `useGoogleCloudSTT`, `useSoniox`)
-- **Async client:** One hook for Whisper (`useWhisperAsync`)
 - **Mode switching:** Hard reset on mode change (disconnect all WebSockets, clear transcript, reset state)
 
 ### Audio Pipeline (Real-Time Mode Only)
@@ -194,29 +212,75 @@ Should the app display live latency, word error rate estimates, or cost-per-minu
 Microphone
   → getUserMedia()
   → AudioWorklet (resample to 16kHz PCM 16-bit mono)
-  → Broadcast to all 4 active provider WebSocket connections simultaneously
+  → Broadcast to all active provider WebSocket connections simultaneously
+     (WebSocket endpoints determined by provider registry, not hardcoded)
 ```
 
-**Key constraint:** All real-time providers require **PCM 16-bit, 16kHz mono**. The AudioWorklet resampler should normalize once, upstream of all WebSocket connections.
+**Key constraint:** All real-time providers require **PCM 16-bit, 16kHz mono**. The AudioWorklet resampler normalizes once, upstream of all WebSocket connections.
 
-**Async mode:** File upload → read entire file as ArrayBuffer → send to Whisper REST API in one request.
+**Async mode:**
+```
+File Upload
+  → Read as ArrayBuffer
+  → Send to all selected provider REST endpoints (determined by provider registry)
+  → Collect results as they return
+```
+
+**Scalability:** Audio pipeline doesn't know about specific providers — it reads from the provider registry and connects to whatever endpoints are configured.
 
 ### Provider Integration Details
 
-#### Real-Time Providers (WebSocket, Streaming)
+All providers support both real-time (WebSocket) and async (REST) modes. Choose the appropriate endpoint based on mode.
 
-| Provider | Protocol | Endpoint | Notes |
+#### Eleven Labs Scribe v2
+
+| Mode | Protocol | Endpoint | Notes |
 |---|---|---|---|
-| Eleven Labs Scribe v2 | WebSocket | `wss://api.elevenlabs.io/v1/speech-to-text/realtime` | Auth via `xi-api-key` header |
-| Gemini Live API | WebSocket | Google AI SDK (`@google/genai`) | Uses `BidiGenerateContent` stream |
-| Google Cloud Speech-to-Text | WebSocket | `wss://speech.googleapis.com/...` | gRPC-web compatible |
-| Soniox | WebSocket | `wss://api.soniox.com/transcribe-websocket` | Auth via token in first message |
+| Real-time | WebSocket | `wss://api.elevenlabs.io/v1/speech-to-text/realtime` | Auth via `xi-api-key` header, stream PCM 16-bit 16kHz |
+| Async | REST | `https://api.elevenlabs.io/v1/speech-to-text` | POST audio file, returns full transcript |
 
-#### Async Provider (REST, File-based)
+#### Gemini Live API
 
-| Provider | Protocol | Endpoint | Notes |
+| Mode | Protocol | Endpoint | Notes |
 |---|---|---|---|
-| OpenAI Whisper | REST / fetch | `https://api.openai.com/v1/audio/transcriptions` | Async only — send audio file after selection |
+| Real-time | WebSocket | Google AI SDK (`@google/genai`) | Uses `BidiGenerateContent` stream |
+| Async | REST | Google AI SDK REST endpoint | Send audio chunks in request body |
+
+#### Google Cloud Speech-to-Text
+
+| Mode | Protocol | Endpoint | Notes |
+|---|---|---|---|
+| Real-time | WebSocket | `wss://speech.googleapis.com/...` | gRPC-web compatible, stream PCM |
+| Async | REST | `https://speech.googleapis.com/v1/speech:recognize` | POST audio file via REST API |
+
+#### Soniox
+
+| Mode | Protocol | Endpoint | Notes |
+|---|---|---|---|
+| Real-time | WebSocket | `wss://api.soniox.com/transcribe-websocket` | Auth via token in first message |
+| Async | REST | `https://api.soniox.com/transcribe` | POST audio file, returns transcript |
+
+#### OpenAI Whisper
+
+| Mode | Protocol | Endpoint | Notes |
+|---|---|---|---|
+| Real-time | REST (chunked) | `https://api.openai.com/v1/audio/transcriptions` | Can chunk file and stream, or collect all then send once |
+| Async | REST | `https://api.openai.com/v1/audio/transcriptions` | Standard batch API, best for large files |
+
+**Scalability note:** To add a new provider, create a config object with:
+```typescript
+{
+  id: 'provider-id',
+  name: 'Provider Name',
+  logo: 'url-to-logo',
+  realtimeEndpoint: 'wss://...',
+  realtimeAuth: {...},
+  asyncEndpoint: 'https://...',
+  asyncAuth: {...},
+  supportedLanguages: [...]
+}
+```
+No UI changes required.
 
 ### Backend (if Q1 requires it)
 - **Supabase Edge Functions** — proxy API calls, hide keys server-side
@@ -228,29 +292,45 @@ Microphone
 ## Data Models
 
 ```typescript
-// App State
-interface AppState {
-  mode: 'realtime' | 'async';  // Hard switch between modes
-  currentSession?: TranscriptionSession;
+// Provider configuration (scalable for new providers)
+interface ProviderConfig {
+  id: string;  // 'elevenlabs' | 'gemini' | 'google' | 'soniox' | 'whisper'
+  name: string;
+  logo: string;
+  realtimeEndpoint: string;
+  realtimeAuth: { type: string; [key: string]: any };
+  asyncEndpoint: string;
+  asyncAuth: { type: string; [key: string]: any };
+  supportedLanguages: string[];
+  description?: string;
 }
 
-// Session (Real-Time)
+// App State
+interface AppState {
+  mode: 'realtime' | 'async';
+  currentSession?: TranscriptionSession;
+  panelProviders: (string | null)[];  // 2×2 grid: 4 provider IDs (can be duplicates or null)
+  availableProviders: ProviderConfig[];  // All registered providers
+}
+
+// Session
 interface TranscriptionSession {
   id: string;
   mode: 'realtime' | 'async';
   startedAt: Date;
   endedAt?: Date;
-  providers: ProviderResult[];
+  providers: ProviderResult[];  // One per active panel
 }
 
-// Per-provider result (Real-Time: 4 active; Async: Whisper only)
+// Per-provider result (works for both modes)
 interface ProviderResult {
-  provider: 'elevenlabs' | 'gemini' | 'google' | 'soniox' | 'whisper';
+  panelId: string;  // Which panel is this result from? (0-3)
+  providerId: string;  // Which provider? (extensible: elevenlabs | gemini | google | soniox | whisper | ...)
   transcript: TranscriptChunk[];
   latencyMs: number[];  // one per chunk (real-time) or null (async)
-  status: 'connecting' | 'live' | 'done' | 'error';
+  processingTimeMs?: number;  // async mode or real-time total
+  status: 'connecting' | 'live' | 'done' | 'error' | 'empty';
   error?: string;
-  processingTimeMs?: number;  // async mode only
 }
 
 // Transcript chunk (streaming word/sentence in real-time, full text in async)
@@ -269,8 +349,14 @@ interface TranscriptChunk {
 - **Mobile:** Responsive layout, mic access works on iOS Safari 16.4+ (real-time mode)
 - **No audio stored server-side** — audio bytes only travel from browser to provider APIs directly (client-side mode) or through ephemeral Edge Function (backend mode)
 - **Mode isolation:** Switching modes must reset all state, disconnect all WebSockets, clear transcript
-- **Error handling:** Clear error state in each provider panel if it fails (bad key, quota exceeded, network drop) — never crash the whole app. In async mode, Whisper failure is blocking (show error, offer retry).
+- **Error handling:** Clear error state in each provider panel if it fails (bad key, quota exceeded, network drop) — never crash the whole app. Other panels continue operating.
 - **Accessibility:** Keyboard navigable record button (real-time), ARIA labels on live transcript regions (`aria-live="polite"`), file input accessible in async mode
+
+**Scalability Requirements:**
+- **Provider-agnostic:** Adding a new provider should require only adding a config object, no React component or hook changes
+- **Grid flexibility:** 2×2 grid should support empty panels, duplicate providers, and any combination
+- **Generic hooks:** `useRealtimeProvider()` and `useAsyncProvider()` should work for any provider in the registry
+- **Config-driven:** All provider metadata, endpoints, auth methods stored in a centralized provider registry (can be loaded from server)
 
 ---
 
@@ -288,18 +374,34 @@ interface TranscriptChunk {
 
 ## Reference Research
 
-### Real-Time Providers (4-way Arena)
-The following providers support real-time audio input via WebSocket:
+All 5 providers support BOTH real-time (WebSocket) and async (REST) modes:
 
-- **Eleven Labs Scribe v2** — ~150ms latency, 90+ languages, speaker diarization
-- **Gemini Live API** — multimodal, VAD built-in, returns text + audio
-- **Google Cloud Speech-to-Text** — 125+ languages, most mature API, ~200ms latency
-- **Soniox** — enterprise accuracy, custom vocabulary, ~300ms latency
+### Eleven Labs Scribe v2
+- **Real-time:** WebSocket streaming, ~150ms latency, 90+ languages, speaker diarization
+- **Async:** REST endpoint for batch file uploads
+- **Strength:** Low latency, speaker diarization support
 
-**Audio standard:** PCM 16-bit, 16kHz, mono
+### Gemini Live API
+- **Real-time:** WebSocket streaming, multimodal (audio + text), VAD built-in
+- **Async:** REST endpoint for file uploads
+- **Strength:** Multimodal, intelligent chunking
 
-### Async Provider
-- **OpenAI Whisper** — REST API, batch processing, ~99% accuracy on English, supports 99+ languages
+### Google Cloud Speech-to-Text
+- **Real-time:** gRPC-web compatible, 125+ languages
+- **Async:** REST endpoint for batch operations
+- **Strength:** Most mature API, language support, enterprise-grade
+
+### Soniox
+- **Real-time:** WebSocket streaming, enterprise accuracy, custom vocabulary, ~300ms latency
+- **Async:** REST endpoint for batch uploads
+- **Strength:** High accuracy, custom vocabulary support
+
+### OpenAI Whisper
+- **Real-time:** Can be used with chunked streaming via REST
+- **Async:** REST endpoint optimized for batch, ~99% accuracy on English, 99+ languages
+- **Strength:** Highest accuracy, multilingual, cost-effective
+
+**Common audio standard for real-time:** PCM 16-bit, 16kHz, mono
 
 ---
 
@@ -310,23 +412,44 @@ Once you've filled in your answers, prepend the following to this file and paste
 ```
 Build a React + TypeScript + Tailwind + shadcn/ui app using the spec below.
 
-This is a dual-mode STT benchmarking platform:
+CRITICAL: Build with a PROVIDER-AGNOSTIC, SCALABLE architecture. Adding new providers should require only config changes, NOT code changes.
 
-1. **Real-Time Arena:** 4-way live transcription in a 2×2 grid from the user's microphone.
-   Scaffold WebSocket hooks for Eleven Labs, Gemini, Google Cloud STT, and Soniox.
-   Implement the AudioWorklet resampler to broadcast PCM 16-bit 16kHz mono to all 4 simultaneously.
-   Show live latency badges and transcript streaming.
+## Key Architecture Points
 
-2. **Async Batch:** Single file upload to OpenAI Whisper.
-   Completely different layout from real-time — minimal, centered, single-column.
-   Show processing progress and full transcript result.
+1. **Provider Registry:** Centralized config object (can be hardcoded initially, designed to load from server later) containing all provider metadata:
+   - id, name, logo, endpoints (real-time WebSocket + async REST), auth methods, supported languages
+   - No hardcoded provider-specific logic in components
 
-Scaffold all screens, both modes, all provider hooks, the AudioWorklet pipeline, and wire up the UI.
-Use placeholder API calls where real provider keys are needed.
-Follow the data models exactly.
+2. **Generic Provider Hooks:** Instead of useElevenLabsSTT(), useGeminiLive(), etc.:
+   - useRealtimeProvider(providerId) — automatically uses the right WebSocket endpoint
+   - useAsyncProvider(providerId) — automatically uses the right REST endpoint
+   - Same logic for any provider, old or new
 
-MODE SWITCHING: Hard reset on mode change (disconnect WebSockets, clear state, fresh session).
-Modes should look completely different visually.
+3. **Generic Panel Component:** <TranscriptionPanel providerId={id} mode={mode} />
+   - Automatically configures itself based on provider config
+   - No hardcoded UI per provider
+
+## Implementation Details
+
+**Dual-mode platform:**
+1. **Real-Time Arena:** 2×2 grid of panels, each with a provider dropdown. User speaks, all selected providers transcribe simultaneously from WebSocket streams.
+   - Broadcast PCM 16-bit 16kHz mono to all active providers
+   - Show live latency badges
+   - Transcripts stream as spoken
+
+2. **Async Batch:** 2×2 grid of panels (same layout), each with provider dropdown. User uploads file, all selected providers process it via REST APIs.
+   - Show progress bars
+   - Display results when done
+   - Allow retry per provider
+
+**Flexibility:**
+- Users can select any provider for any panel (5 providers: Eleven Labs, Gemini, Google, Soniox, Whisper)
+- Same provider can be used multiple times
+- Panels can be left empty (None)
+
+MODE SWITCHING: Hard reset on mode change (disconnect WebSockets, clear state, fresh session). Modes should look visually different.
+
+Follow the data models exactly, especially ProviderConfig and the extensible provider ID system.
 
 [PASTE REST OF THIS DOCUMENT]
 ```
