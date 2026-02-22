@@ -5,6 +5,15 @@ const MAX_AUDIO_SIZE = 15_000_000; // ~10MB base64
 const LANGUAGE_REGEX = /^[a-z]{2}(-[A-Z]{2})?$|^auto$/;
 const MIME_TYPE_REGEX = /^audio\/[a-z0-9.+-]+$/;
 
+const ISO639_1_TO_3: Record<string, string> = {
+  en: "eng", es: "spa", fr: "fra", de: "deu", pt: "por",
+  ja: "jpn", zh: "zho", ko: "kor", ar: "ara", hi: "hin",
+  it: "ita", nl: "nld", ru: "rus",
+};
+function toIso3(lang: string): string {
+  return ISO639_1_TO_3[lang] ?? lang;
+}
+
 const ENCRYPTION_KEY = () => Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 function getAdminClient() {
@@ -27,7 +36,12 @@ function isAllowedOrigin(origin: string): boolean {
   if (!origin) return false;
   try {
     const url = new URL(origin);
-    return url.hostname.endsWith(".lovable.app") && url.protocol === "https:";
+    return (
+      url.hostname === "localhost" ||
+      url.hostname === "127.0.0.1" ||
+      url.hostname.endsWith(".lovable.app") ||
+      url.hostname.endsWith(".supabase.co")
+    );
   } catch {
     return false;
   }
@@ -36,7 +50,7 @@ function isAllowedOrigin(origin: string): boolean {
 function getCorsHeaders(req: Request) {
   const origin = req.headers.get("origin") || "";
   return {
-    "Access-Control-Allow-Origin": isAllowedOrigin(origin) ? origin : "https://audio-arena-champions.lovable.app",
+    "Access-Control-Allow-Origin": isAllowedOrigin(origin) ? origin : "*",
     "Access-Control-Allow-Headers":
       "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
   };
@@ -62,7 +76,7 @@ async function transcribeWithProvider(
         formData.append("tag_audio_events", "true");
         formData.append("diarize", "true");
         if (language && language !== "auto") {
-          formData.append("language_code", language === "en" ? "eng" : language);
+          formData.append("language_code", toIso3(language));
         }
 
         const res = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
@@ -198,15 +212,14 @@ Deno.serve(async (req) => {
     { global: { headers: { Authorization: authHeader } } }
   );
 
-  const token = authHeader.replace("Bearer ", "");
-  const { data: claimsData, error: claimsError } = await supabase.auth.getClaims(token);
-  if (claimsError || !claimsData?.claims) {
+  const { data: { user }, error: userError } = await supabase.auth.getUser();
+  if (userError || !user) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
-  const userId = claimsData.claims.sub as string;
+  const userId = user.id;
 
   try {
     const body = await req.json();

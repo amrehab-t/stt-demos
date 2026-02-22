@@ -8,7 +8,12 @@ function isAllowedOrigin(origin: string): boolean {
   if (!origin) return false;
   try {
     const url = new URL(origin);
-    return url.hostname.endsWith(".lovable.app") && url.protocol === "https:";
+    return (
+      url.hostname === "localhost" ||
+      url.hostname === "127.0.0.1" ||
+      url.hostname.endsWith(".lovable.app") ||
+      url.hostname.endsWith(".supabase.co")
+    );
   } catch {
     return false;
   }
@@ -17,7 +22,7 @@ function isAllowedOrigin(origin: string): boolean {
 function getCorsHeaders(req: Request) {
   const origin = req.headers.get("origin") || "";
   return {
-    "Access-Control-Allow-Origin": isAllowedOrigin(origin) ? origin : "https://audio-arena-champions.lovable.app",
+    "Access-Control-Allow-Origin": isAllowedOrigin(origin) ? origin : "*",
     "Access-Control-Allow-Headers":
       "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
   };
