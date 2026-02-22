@@ -82,7 +82,7 @@ src/
 
   hooks/
     useAudioCapture.ts           # Mic access + PCM 16-bit 16kHz conversion
-    useRealtimeProvider.ts       # WebSocket relay for WS providers, HTTP fallback for Whisper
+    useRealtimeProvider.ts       # WebSocket relay for WS providers (elevenlabs, gemini, soniox), HTTP polling for gemini3/google/whisper
     useAsyncProvider.ts          # Sends file to stt-async edge function
     useApiKeys.ts                # CRUD for API keys via manage-api-keys edge function
     use-toast.ts                 # Toast hook
@@ -105,8 +105,8 @@ supabase/
   config.toml                   # Supabase local config
   functions/
     manage-api-keys/index.ts    # GET/POST/DELETE API keys (encrypt/decrypt with pgcrypto)
-    stt-realtime/index.ts       # REST-based chunked transcription (HTTP fallback for Whisper)
-    stt-ws-relay/index.ts       # True WebSocket relay for ElevenLabs, Gemini, Google, Soniox
+    stt-realtime/index.ts       # HTTP polling path for whisper, gemini3, google (includes OAuth2 JWT for Google)
+    stt-ws-relay/index.ts       # True WebSocket relay for ElevenLabs, Gemini 2.5, Soniox
     stt-async/index.ts          # Full file transcription
     check-user-status/index.ts  # Returns approved + role for current user
     admin-users/index.ts        # Admin: list users, approve/reject
@@ -123,13 +123,17 @@ supabase/
 
 Single source of truth. All UI reads from `PROVIDERS` array — no UI changes needed to add a provider.
 
-| ID | Name | Real-time endpoint (registered) | Async endpoint |
+| ID | Name | Real-time mode | Async endpoint |
 |---|---|---|---|
-| `elevenlabs` | Eleven Labs | `wss://api.elevenlabs.io/v1/speech-to-text/realtime` | `https://api.elevenlabs.io/v1/speech-to-text` |
-| `gemini` | Gemini Live | `wss://generativelanguage.googleapis.com/ws` | Gemini generateContent REST |
-| `google` | Google Cloud STT | `wss://speech.googleapis.com/v1/speech:streamingRecognize` | `/v1/speech:recognize` |
-| `soniox` | Soniox | `wss://stt-rt.soniox.com/transcribe-websocket` (fallback: `api.soniox.com`) | `https://api.soniox.com/v1/transcribe` |
-| `whisper` | OpenAI Whisper | (REST only) | `https://api.openai.com/v1/audio/transcriptions` |
+| `elevenlabs` | Eleven Labs | WebSocket → `wss://api.elevenlabs.io/v1/speech-to-text/realtime` | `https://api.elevenlabs.io/v1/speech-to-text` |
+| `gemini` | Gemini 2.5 Flash Live | WebSocket → `wss://generativelanguage.googleapis.com/ws` (BidiGenerateContent, model: `gemini-live-2.5-flash-native-audio`) | `gemini-2.5-flash` generateContent REST |
+| `gemini3` | Gemini 3 Flash | HTTP polling → `gemini-3-flash-preview` generateContent REST | `gemini-3-flash-preview` generateContent REST |
+| `google` | Google Cloud STT | HTTP polling → `https://speech.googleapis.com/v1/speech:recognize` (OAuth2 JWT) | `/v1/speech:recognize` (OAuth2 JWT) |
+| `soniox` | Soniox | WebSocket → `wss://stt-rt.soniox.com/transcribe-websocket` (fallback: `api.soniox.com`) | `https://api.soniox.com/v1/transcribe` |
+| `whisper` | OpenAI Whisper | HTTP polling → `https://api.openai.com/v1/audio/transcriptions` | `https://api.openai.com/v1/audio/transcriptions` |
+
+**WebSocket providers** (use `stt-ws-relay`): `elevenlabs`, `gemini`, `soniox`
+**HTTP polling providers** (use `stt-realtime` every 3s): `gemini3`, `google`, `whisper`
 
 Default panel order: `[elevenlabs, gemini, google, soniox]`
 
@@ -179,19 +183,21 @@ All functions enforce:
 
 Test endpoints per provider:
 - ElevenLabs: `GET /v1/user`
-- Gemini: `GET /v1beta/models?key=...`
-- Google: validates JSON structure of service account key (no live call)
+- Gemini / Gemini3: `GET /v1beta/models?key=...` (both use Gemini API keys; `gemini3` case falls through to same test)
+- Google: validates JSON structure of service account key (no live call — OAuth2 exchange would require the live token endpoint)
 - Soniox: `GET /v1/models`
 - Whisper: `GET /v1/models`
 
 ### `stt-realtime`
-HTTP fallback for Whisper (non-WebSocket provider). Accepts `{ provider_id, language, audio: base64_pcm }`. Wraps PCM in a WAV header and calls provider REST endpoints.
+HTTP polling path for non-WebSocket providers: `whisper`, `gemini3`, `google`. Accepts `{ provider_id, language, audio: base64_pcm }`. Wraps PCM in a WAV header and calls provider REST endpoints.
 
 Minimum audio size: 1600 bytes (silently returns empty transcript below this).
 Max audio size: 5MB base64.
 
+Google uses this path (not the WS relay) because Deno's `WebSocket` constructor does not support custom headers — making it impossible to send `Authorization: Bearer <token>` on the WebSocket upgrade request. The function performs a full Google OAuth2 JWT exchange on each call via `getGoogleAccessToken()`.
+
 ### `stt-ws-relay`
-True WebSocket relay for ElevenLabs, Gemini, Google, and Soniox. The client opens a WebSocket to this function, which authenticates, decrypts the user's API key, then opens an upstream WebSocket to the provider and relays frames bidirectionally.
+True WebSocket relay for ElevenLabs, Gemini, and Soniox. The client opens a WebSocket to this function, which authenticates, decrypts the user's API key, then opens an upstream WebSocket to the provider and relays frames bidirectionally.
 
 URL: `wss://<project>.supabase.co/functions/v1/stt-ws-relay?provider_id=...&language=...&token=...`
 
@@ -199,8 +205,7 @@ URL: `wss://<project>.supabase.co/functions/v1/stt-ws-relay?provider_id=...&lang
 
 **Provider-specific behavior in the relay**:
 - **ElevenLabs**: Fetches a signed single-use token via REST, wraps PCM binary as base64 JSON (`input_audio_chunk`)
-- **Gemini**: Sends setup message with model config and system instruction, forwards raw binary audio
-- **Google**: Sends `streamingConfig` with `LINEAR16`/16kHz/language, forwards raw binary audio
+- **Gemini**: Sends setup message (`models/gemini-live-2.5-flash-native-audio`, camelCase fields, `inputAudioTranscription: {}`). Wraps PCM binary as base64 JSON `realtimeInput.mediaChunks` with `mimeType: "audio/pcm;rate=16000"`. Waits 150ms after setup before flushing buffered audio (same as Soniox) to let the model process the config.
 - **Soniox**: Uses `connectSonioxUpstream()` with auto-fallback (current → legacy). Sends API-version-appropriate init message, forwards raw binary audio. Uses finalize protocol on disconnect (see below).
 
 **Soniox finalize protocol**: The client sends `{ type: "finalize" }` control message before closing its WS. The relay then sends the Soniox end signal (empty string for current API, `Uint8Array(0)` for legacy), waits up to 5 seconds for the `finished: true` response, and only then closes upstream. A server-side safety net in `clientWs.onclose` handles unexpected disconnects (tab close, network failure) the same way.
@@ -247,10 +252,10 @@ Mic → getUserMedia()
     → Float32 → PCM Int16 conversion
     → useAudioCapture.onAudioChunk(ArrayBuffer)
         → broadcast to all 4 useRealtimeProvider instances
-            → WebSocket providers (elevenlabs, gemini, google, soniox):
+            → WebSocket providers (elevenlabs, gemini, soniox):
                 → WebSocket to stt-ws-relay edge function
                 → relay upstream to provider WSS endpoint
-            → HTTP providers (whisper):
+            → HTTP polling providers (gemini3, google, whisper):
                 → buffer accumulation (3s window)
                 → base64 encode → POST stt-realtime edge function
 ```
@@ -261,16 +266,25 @@ Mic → getUserMedia()
 
 ## Known issues / technical debt
 
-### 1. Google Cloud STT uses Bearer token directly
-The async and realtime functions pass the raw API key as a Bearer token. Google Cloud actually requires OAuth2 or a service account JWT — not an API key. The manage-api-keys test validates JSON structure only.
+### 1. Google Cloud STT realtime latency
+Google was moved off WebSocket to HTTP polling (same as Whisper) because Deno's `WebSocket` constructor cannot send custom headers, making `Authorization: Bearer` on the WS upgrade impossible. This means ~3s transcript latency in realtime mode. True streaming would require gRPC, which is not available in Deno edge functions without a library.
 
-### 2. Whisper uses HTTP fallback only
-Whisper has no WebSocket endpoint, so it falls back to `stt-realtime` (HTTP polling every 3s). All other providers use true WebSocket relay via `stt-ws-relay`.
+### 2. Whisper / Gemini 3 / Google use HTTP polling
+These providers have no WebSocket path. They use `stt-realtime` (HTTP polling every 3s). Real-time latency is bounded by the 3s buffer window plus provider processing time.
 
-### 3. Soniox uses auto-fallback endpoint strategy
+### 3. Gemini 3 Flash preview status
+`gemini-3-flash-preview` is a preview model ID. Monitor the Gemini API changelog for the stable ID (likely `gemini-3-flash` or `gemini-3-flash-001`). Update the model string in `stt-async` and `stt-realtime` when stable is released.
+
+### 4. Gemini 3 Flash has no Live API support
+`gemini-3-flash-preview` does not support `BidiGenerateContent` (the Live API WebSocket). When Google adds support, move `"gemini3"` into `WS_PROVIDERS` in `useRealtimeProvider.ts` and add a relay case in `stt-ws-relay`.
+
+### 5. Google OAuth2 token not cached
+`getGoogleAccessToken()` in `stt-realtime` and `stt-async` performs a full JWT sign + token exchange on every call. Tokens are valid for 1 hour. Edge function instances are stateless so in-memory caching isn't reliable, but for high-volume use a KV store (Supabase `pg_secrets` or Deno KV) could cache the token until near expiry.
+
+### 6. Soniox uses auto-fallback endpoint strategy
 The relay tries `wss://stt-rt.soniox.com/transcribe-websocket` (current API) first with a 3-second timeout, then falls back to `wss://api.soniox.com/transcribe-websocket` (legacy). As of Feb 2026, the current API connects successfully from Supabase Deno edge functions.
 
-### 4. Supabase MCP server not configured
+### 7. Supabase MCP server not configured
 The Supabase MCP server requires `SUPABASE_ACCESS_TOKEN` to be set. Currently not configured, so edge function logs and management must be done via the Supabase CLI or dashboard. Deploy edge functions with: `supabase functions deploy <name> --no-verify-jwt`. The Supabase CLI is installed and authenticated — direct CLI deploy works without MCP.
 
 ---
@@ -354,8 +368,10 @@ Soniox has **two** WebSocket API versions. The relay (`stt-ws-relay`) tries the 
 ### Client-side parser (`useRealtimeProvider.ts`)
 `parseProviderMessage` returns `{ text, isFinal, mode }` where `mode` is:
 - `"replace"` for Soniox (cumulative full-stream tokens) — entire transcript is replaced each message
-- `"replace_partial"` for ElevenLabs (cumulative per-utterance) — replaces last non-final entry, keeps committed entries
-- `"append"` for Gemini, Google, Whisper (incremental) — transcript is appended
+- `"replace_partial"` for ElevenLabs, Google (cumulative per-utterance) — replaces last non-final entry, keeps committed entries
+- `"append"` for Gemini, Whisper (incremental) — transcript is appended
+
+Gemini parser checks **both** `serverContent.modelTurn.parts[0].text` (text response) and `serverContent.inputTranscription.text` (native audio transcription) — whichever is non-empty wins. The `inputAudioTranscription: {}` field in the setup message enables the latter path on native audio models.
 
 Handles both Soniox formats:
 - Current API: reads `msg.tokens[].text` and `msg.tokens[].is_final`
