@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useAppState } from "@/contexts/AppStateContext";
 import { PROVIDERS } from "@/lib/providers";
 import {
@@ -9,7 +10,7 @@ import {
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Copy, Trash2 } from "lucide-react";
+import { Copy, Trash2, ChevronDown, ChevronUp } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ProviderStatus } from "@/lib/types";
 
@@ -20,6 +21,7 @@ interface TranscriptionPanelProps {
   latencyMs?: number;
   wordCount?: number;
   error?: string;
+  rawMessages?: Array<{ ts: number; raw: string }>;
   onCopy?: () => void;
   onClear?: () => void;
   onRetry?: () => void;
@@ -42,10 +44,12 @@ export function TranscriptionPanel({
   latencyMs,
   wordCount,
   error,
+  rawMessages = [],
   onCopy,
   onClear,
   onRetry,
 }: TranscriptionPanelProps) {
+  const [showRaw, setShowRaw] = useState(false);
   const { panelSelections, setPanelProvider } = useAppState();
   const selectedId = panelSelections[panelIndex];
   const provider = PROVIDERS.find((p) => p.id === selectedId);
@@ -110,6 +114,34 @@ export function TranscriptionPanel({
           </p>
         )}
       </div>
+
+      {/* Raw messages panel */}
+      {rawMessages.length > 0 && (
+        <div className="border-t border-border">
+          <button
+            onClick={() => setShowRaw(!showRaw)}
+            className="flex items-center gap-1 px-3 py-1 text-[10px] text-muted-foreground hover:text-foreground w-full"
+          >
+            {showRaw ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+            Raw ({rawMessages.length})
+          </button>
+          {showRaw && (
+            <div className="max-h-[200px] overflow-y-auto px-3 pb-2">
+              {rawMessages.map((msg, idx) => (
+                <pre
+                  key={idx}
+                  className="text-[10px] font-mono text-muted-foreground bg-muted/50 rounded p-1 mb-1 whitespace-pre-wrap break-all"
+                >
+                  {(() => {
+                    try { return JSON.stringify(JSON.parse(msg.raw), null, 2); }
+                    catch { return msg.raw; }
+                  })()}
+                </pre>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Footer */}
       <div className="flex items-center justify-between px-3 py-1.5 border-t border-border bg-muted/20 text-xs text-muted-foreground">

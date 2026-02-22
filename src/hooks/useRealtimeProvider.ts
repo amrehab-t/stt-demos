@@ -10,36 +10,55 @@ interface UseRealtimeProviderOptions {
 
 const WS_PROVIDERS = ["elevenlabs", "gemini", "google", "soniox"];
 const CHUNK_INTERVAL_MS = 3000;
+const SONIOX_FINALIZE_TIMEOUT_MS = 5000;
 
 /** Strip XML-like tags from provider error messages (e.g. Soniox's <organization_balance_exhausted>) */
 function cleanErrorMessage(msg: string): string {
   return msg.replace(/<[^>]+>/g, "").trim();
 }
 
-function parseProviderMessage(providerId: string, raw: string): { text: string; isFinal: boolean } | null {
+interface ParsedMessage {
+  text: string;
+  isFinal: boolean;
+  /** "replace" = cumulative full-stream (Soniox), "replace_partial" = cumulative per-utterance (ElevenLabs), "append" = incremental */
+  mode: "append" | "replace" | "replace_partial";
+}
+
+function parseProviderMessage(providerId: string, raw: string): ParsedMessage | null {
   try {
     const msg = JSON.parse(raw);
     switch (providerId) {
       case "elevenlabs": {
         if (msg.message_type !== "partial_transcript" && msg.message_type !== "committed_transcript") return null;
         const text = msg.text ?? "";
-        return text ? { text, isFinal: msg.message_type === "committed_transcript" } : null;
+        return text ? { text, isFinal: msg.message_type === "committed_transcript", mode: "replace_partial" } : null;
       }
       case "gemini": {
         const text = msg.serverContent?.modelTurn?.parts?.[0]?.text ?? "";
-        return text ? { text, isFinal: true } : null;
+        return text ? { text, isFinal: true, mode: "append" } : null;
       }
       case "google": {
         const result = msg.results?.[0];
         const text = result?.alternatives?.[0]?.transcript ?? "";
-        return text ? { text, isFinal: result?.isFinal ?? false } : null;
+        return text ? { text, isFinal: result?.isFinal ?? false, mode: "append" } : null;
       }
       case "soniox": {
-        const text = (msg.words ?? [])
-          .filter((w: any) => w.type === "word" || w.type === "punctuation")
-          .map((w: any) => w.text)
-          .join(" ");
-        return text ? { text, isFinal: msg.final_proc_time_ms != null } : null;
+        // Current API: cumulative { tokens: [...] } — each message has ALL tokens
+        if (msg.tokens) {
+          const tokens = msg.tokens as any[];
+          const finalText = tokens.filter((t) => t.is_final).map((t) => t.text).join("");
+          const nonFinalText = tokens.filter((t) => !t.is_final).map((t) => t.text).join("");
+          const text = finalText + nonFinalText;
+          const isFinal = tokens.length > 0 && tokens.every((t) => t.is_final);
+          return text ? { text, isFinal, mode: "replace" } : null;
+        }
+        // Legacy: cumulative { fw: [...], nfw: [...] }
+        const fw = msg.fw ?? [];
+        const nfw = msg.nfw ?? [];
+        const allWords = [...fw, ...nfw];
+        const text = allWords.map((w: any) => w.t ?? w.text ?? "").join(" ");
+        const isFinal = fw.length > 0 && nfw.length === 0;
+        return text ? { text, isFinal, mode: "replace" } : null;
       }
       default:
         return null;
@@ -49,12 +68,25 @@ function parseProviderMessage(providerId: string, raw: string): { text: string; 
   }
 }
 
+/** Check if a Soniox message is the finished signal */
+function isSonioxFinished(raw: string): boolean {
+  try {
+    const msg = JSON.parse(raw);
+    // Current API: { finished: true }
+    if (msg.finished === true) return true;
+    // Legacy: empty fw+nfw with tpt > 0
+    if (msg.fw && msg.nfw && msg.fw.length === 0 && msg.nfw.length === 0 && (msg.tpt ?? 0) > 0) return true;
+  } catch { /* ignore */ }
+  return false;
+}
+
 export function useRealtimeProvider({ providerId, language, enabled }: UseRealtimeProviderOptions) {
   const [transcript, setTranscript] = useState<TranscriptChunk[]>([]);
   const [status, setStatus] = useState<ProviderStatus>("idle");
   const [latencyMs, setLatencyMs] = useState<number[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [wordCount, setWordCount] = useState(0);
+  const [rawMessages, setRawMessages] = useState<Array<{ ts: number; raw: string }>>([]);
 
   const wsRef = useRef<WebSocket | null>(null);
   const sendTimeRef = useRef<number>(0);
@@ -62,14 +94,40 @@ export function useRealtimeProvider({ providerId, language, enabled }: UseRealti
   const bufferRef = useRef<ArrayBuffer[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fatalErrorRef = useRef(false);
+  const finalizeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const chunkCountRef = useRef(0);
+  /** Buffer audio chunks while WS is still connecting */
+  const pendingAudioRef = useRef<ArrayBuffer[]>([]);
 
   useEffect(() => { enabledRef.current = enabled; }, [enabled]);
 
   const isWsProvider = providerId ? WS_PROVIDERS.includes(providerId) : false;
 
+  /** Clean up the finalize timeout */
+  const clearFinalizeTimeout = useCallback(() => {
+    if (finalizeTimeoutRef.current) {
+      clearTimeout(finalizeTimeoutRef.current);
+      finalizeTimeoutRef.current = null;
+    }
+  }, []);
+
   // ── WebSocket path ──────────────────────────────────────────────────────────
   const connectWs = useCallback(async () => {
     if (!providerId || !WS_PROVIDERS.includes(providerId)) return;
+
+    // Clean up existing WS before opening a new one (e.g., language switch)
+    if (wsRef.current) {
+      const oldWs = wsRef.current;
+      oldWs.onmessage = null;
+      oldWs.onclose = null;
+      oldWs.onerror = null;
+      oldWs.close(1000, "reconnecting");
+      wsRef.current = null;
+    }
+    // Reset state for the new connection
+    setTranscript([]); setLatencyMs([]); setError(null); setWordCount(0); setRawMessages([]);
+    pendingAudioRef.current = []; chunkCountRef.current = 0;
+    clearFinalizeTimeout();
 
     const { data: { session } } = await supabase.auth.getSession();
     const token = session?.access_token;
@@ -90,10 +148,25 @@ export function useRealtimeProvider({ providerId, language, enabled }: UseRealti
 
     ws.onopen = () => {
       console.log(`[useRealtimeProvider:${providerId}] WS open`);
-      if (enabledRef.current) setStatus("live");
+      // Status stays "connecting" until relay sends relay_ready
+      // Flush any audio chunks that arrived while WS was connecting
+      if (pendingAudioRef.current.length > 0) {
+        console.log(`[useRealtimeProvider:${providerId}] flushing ${pendingAudioRef.current.length} buffered chunks`);
+        for (const buf of pendingAudioRef.current) {
+          ws.send(buf);
+        }
+        pendingAudioRef.current = [];
+      }
     };
 
     ws.onmessage = (evt) => {
+      // Diagnostic logging
+      if (typeof evt.data === "string") {
+        console.log(`[useRealtimeProvider:${providerId}] msg (${evt.data.length}ch): ${evt.data.slice(0, 200)}`);
+      } else {
+        console.log(`[useRealtimeProvider:${providerId}] binary msg (${(evt.data as ArrayBuffer).byteLength}B)`);
+      }
+
       if (typeof evt.data === "string") {
         try {
           const msg = JSON.parse(evt.data);
@@ -105,7 +178,20 @@ export function useRealtimeProvider({ providerId, language, enabled }: UseRealti
             fatalErrorRef.current = true;
             return;
           }
+          if (msg.type === "relay_ready") {
+            console.log(`[useRealtimeProvider:${providerId}] relay_ready received`);
+            if (enabledRef.current) setStatus("live");
+            return;
+          }
         } catch { /* not JSON, continue to provider parser */ }
+      }
+
+      // Capture raw message for debug panel (relay control messages already returned above)
+      if (typeof evt.data === "string") {
+        setRawMessages(prev => {
+          const updated = [...prev, { ts: Date.now(), raw: evt.data as string }];
+          return updated.length > 200 ? updated.slice(-200) : updated;
+        });
       }
 
       const latency = Date.now() - sendTimeRef.current;
@@ -113,8 +199,40 @@ export function useRealtimeProvider({ providerId, language, enabled }: UseRealti
 
       const parsed = parseProviderMessage(providerId, typeof evt.data === "string" ? evt.data : "");
       if (parsed?.text) {
-        setTranscript((prev) => [...prev, { text: parsed.text, isFinal: parsed.isFinal, timestampMs: Date.now() }]);
-        setWordCount((prev) => prev + parsed.text.split(/\s+/).filter(Boolean).length);
+        if (parsed.mode === "replace") {
+          // Cumulative full-stream mode (Soniox): replace entire transcript
+          setTranscript([{ text: parsed.text, isFinal: parsed.isFinal, timestampMs: Date.now() }]);
+          setWordCount(parsed.text.split(/\s+/).filter(Boolean).length);
+        } else if (parsed.mode === "replace_partial") {
+          // Cumulative per-utterance mode (ElevenLabs): replace last non-final entry
+          let newWordCount = 0;
+          setTranscript((prev) => {
+            const now = Date.now();
+            const entry = { text: parsed.text, isFinal: parsed.isFinal, timestampMs: now };
+            const lastIdx = prev.length - 1;
+            let updated;
+            if (lastIdx >= 0 && !prev[lastIdx].isFinal) {
+              updated = [...prev.slice(0, lastIdx), entry];
+            } else {
+              updated = [...prev, entry];
+            }
+            newWordCount = updated.map(t => t.text).join(" ").split(/\s+/).filter(Boolean).length;
+            return updated;
+          });
+          setWordCount(newWordCount);
+        } else {
+          // Incremental mode (Gemini, Google, Whisper): append
+          setTranscript((prev) => [...prev, { text: parsed.text, isFinal: parsed.isFinal, timestampMs: Date.now() }]);
+          setWordCount((prev) => prev + parsed.text.split(/\s+/).filter(Boolean).length);
+        }
+      }
+
+      // Detect Soniox finished signal → close WS gracefully
+      if (providerId === "soniox" && typeof evt.data === "string" && isSonioxFinished(evt.data)) {
+        console.log(`[useRealtimeProvider:${providerId}] finished signal received, closing WS`);
+        clearFinalizeTimeout();
+        ws.close(1000, "finished");
+        wsRef.current = null;
       }
     };
 
@@ -128,6 +246,7 @@ export function useRealtimeProvider({ providerId, language, enabled }: UseRealti
 
     ws.onclose = (evt) => {
       console.log(`[useRealtimeProvider:${providerId}] WS closed — code:${evt.code} reason:"${evt.reason}"`);
+      clearFinalizeTimeout();
       if (fatalErrorRef.current) {
         // Don't reconnect on provider errors (auth, billing, etc.)
         return;
@@ -142,7 +261,7 @@ export function useRealtimeProvider({ providerId, language, enabled }: UseRealti
         setStatus("idle");
       }
     };
-  }, [providerId, language]);
+  }, [providerId, language, clearFinalizeTimeout]);
 
   // ── Whisper HTTP fallback path ──────────────────────────────────────────────
   const sendBufferedAudio = useCallback(async () => {
@@ -173,7 +292,24 @@ export function useRealtimeProvider({ providerId, language, enabled }: UseRealti
   // ── Lifecycle ──────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!enabled || !providerId) {
-      if (wsRef.current) { wsRef.current.close(1000, "disabled"); wsRef.current = null; }
+      if (wsRef.current) {
+        const ws = wsRef.current;
+        if (providerId === "soniox" && ws.readyState === WebSocket.OPEN) {
+          // Send finalize control message before closing, keep WS open for final tokens
+          console.log(`[useRealtimeProvider:${providerId}] sending finalize before close`);
+          ws.send(JSON.stringify({ type: "finalize" }));
+          finalizeTimeoutRef.current = setTimeout(() => {
+            console.log(`[useRealtimeProvider:${providerId}] finalize timeout, force-closing WS`);
+            if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+              wsRef.current.close(1000, "finalize-timeout");
+            }
+            wsRef.current = null;
+          }, SONIOX_FINALIZE_TIMEOUT_MS);
+        } else {
+          ws.close(1000, "disabled");
+          wsRef.current = null;
+        }
+      }
       if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
       if (!enabled) setStatus("idle");
       return;
@@ -188,18 +324,38 @@ export function useRealtimeProvider({ providerId, language, enabled }: UseRealti
     }
 
     return () => {
-      if (wsRef.current) { wsRef.current.close(1000, "cleanup"); wsRef.current = null; }
+      clearFinalizeTimeout();
+      if (wsRef.current) {
+        wsRef.current.onmessage = null;
+        wsRef.current.onclose = null;
+        wsRef.current.onerror = null;
+        if (providerId === "soniox" && wsRef.current.readyState === WebSocket.OPEN) {
+          try { wsRef.current.send(JSON.stringify({ type: "finalize" })); } catch { /* ignore */ }
+        }
+        wsRef.current.close(1000, "cleanup");
+        wsRef.current = null;
+      }
       if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     };
-  }, [enabled, providerId, connectWs, sendBufferedAudio, isWsProvider]);
+  }, [enabled, providerId, connectWs, sendBufferedAudio, isWsProvider, clearFinalizeTimeout]);
 
   // ── addAudioChunk ──────────────────────────────────────────────────────────
   const addAudioChunk = useCallback((pcmBuffer: ArrayBuffer) => {
     if (!providerId || !enabledRef.current) return;
     if (isWsProvider) {
+      chunkCountRef.current++;
       sendTimeRef.current = Date.now();
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(pcmBuffer);
+        if (chunkCountRef.current % 50 === 1) {
+          console.log(`[useRealtimeProvider:${providerId}] sent chunk #${chunkCountRef.current} (${pcmBuffer.byteLength}B)`);
+        }
+      } else if (wsRef.current?.readyState === WebSocket.CONNECTING) {
+        // Buffer audio while WS is still connecting — will be flushed on open
+        pendingAudioRef.current.push(pcmBuffer);
+        if (chunkCountRef.current <= 3) {
+          console.log(`[useRealtimeProvider:${providerId}] buffering chunk #${chunkCountRef.current} (WS connecting)`);
+        }
       }
     } else {
       bufferRef.current.push(pcmBuffer);
@@ -207,11 +363,14 @@ export function useRealtimeProvider({ providerId, language, enabled }: UseRealti
   }, [providerId, isWsProvider]);
 
   const reset = useCallback(() => {
-    setTranscript([]); setLatencyMs([]); setError(null); setWordCount(0); setStatus("idle");
+    setTranscript([]); setLatencyMs([]); setError(null); setWordCount(0); setRawMessages([]); setStatus("idle");
     bufferRef.current = [];
+    pendingAudioRef.current = [];
+    chunkCountRef.current = 0;
     fatalErrorRef.current = false;
+    clearFinalizeTimeout();
     if (wsRef.current) { wsRef.current.close(1000, "reset"); wsRef.current = null; }
-  }, []);
+  }, [clearFinalizeTimeout]);
 
   return {
     transcript,
@@ -222,5 +381,6 @@ export function useRealtimeProvider({ providerId, language, enabled }: UseRealti
     wordCount,
     addAudioChunk,
     reset,
+    rawMessages,
   };
 }

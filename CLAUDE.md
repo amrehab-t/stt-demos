@@ -128,7 +128,7 @@ Single source of truth. All UI reads from `PROVIDERS` array — no UI changes ne
 | `elevenlabs` | Eleven Labs | `wss://api.elevenlabs.io/v1/speech-to-text/realtime` | `https://api.elevenlabs.io/v1/speech-to-text` |
 | `gemini` | Gemini Live | `wss://generativelanguage.googleapis.com/ws` | Gemini generateContent REST |
 | `google` | Google Cloud STT | `wss://speech.googleapis.com/v1/speech:streamingRecognize` | `/v1/speech:recognize` |
-| `soniox` | Soniox | `wss://api.soniox.com/transcribe-websocket` | `https://api.soniox.com/v1/transcribe` |
+| `soniox` | Soniox | `wss://stt-rt.soniox.com/transcribe-websocket` (fallback: `api.soniox.com`) | `https://api.soniox.com/v1/transcribe` |
 | `whisper` | OpenAI Whisper | (REST only) | `https://api.openai.com/v1/audio/transcriptions` |
 
 Default panel order: `[elevenlabs, gemini, google, soniox]`
@@ -195,6 +195,24 @@ True WebSocket relay for ElevenLabs, Gemini, Google, and Soniox. The client open
 
 URL: `wss://<project>.supabase.co/functions/v1/stt-ws-relay?provider_id=...&language=...&token=...`
 
+**Audio buffering**: The relay queues audio packets received from the client until the upstream WebSocket is connected and the init/config message has been sent. This prevents audio loss during the connection setup window. Once upstream is ready, buffered packets are flushed in order.
+
+**Provider-specific behavior in the relay**:
+- **ElevenLabs**: Fetches a signed single-use token via REST, wraps PCM binary as base64 JSON (`input_audio_chunk`)
+- **Gemini**: Sends setup message with model config and system instruction, forwards raw binary audio
+- **Google**: Sends `streamingConfig` with `LINEAR16`/16kHz/language, forwards raw binary audio
+- **Soniox**: Uses `connectSonioxUpstream()` with auto-fallback (current → legacy). Sends API-version-appropriate init message, forwards raw binary audio. Uses finalize protocol on disconnect (see below).
+
+**Soniox finalize protocol**: The client sends `{ type: "finalize" }` control message before closing its WS. The relay then sends the Soniox end signal (empty string for current API, `Uint8Array(0)` for legacy), waits up to 5 seconds for the `finished: true` response, and only then closes upstream. A server-side safety net in `clientWs.onclose` handles unexpected disconnects (tab close, network failure) the same way.
+
+**Client-side audio buffering**: `useRealtimeProvider` buffers audio chunks in `pendingAudioRef` while the WS is still in `CONNECTING` state. On `ws.onopen`, buffered chunks are flushed. This prevents audio loss during the relay connection setup window.
+
+**Relay-ready handshake**: The relay sends `{ type: "relay_ready" }` to the client after upstream is connected, init is sent, and buffered audio is flushed. The client stays in `"connecting"` status until this signal arrives, then transitions to `"live"`. This prevents the UI from showing "live" before the provider is actually ready to receive audio.
+
+**Soniox silence warm-up**: After sending the Soniox init message, the relay sends a 320-byte silence buffer (10ms of 16kHz PCM16) before the 150ms delay. This primes the Soniox engine so it doesn't miss the first words of real audio.
+
+**ElevenLabs audio buffering**: ElevenLabs audio chunks received while upstream is not yet OPEN are queued (as base64 JSON) and flushed on upstream open, rather than dropped. This prevents audio loss during the signed-token fetch window.
+
 ### `stt-async`
 Accepts `{ provider_id, language, audio: base64, file_name, mime_type }`.
 Max audio: 15MB base64 (~10MB file).
@@ -249,6 +267,32 @@ The async and realtime functions pass the raw API key as a Bearer token. Google 
 ### 2. Whisper uses HTTP fallback only
 Whisper has no WebSocket endpoint, so it falls back to `stt-realtime` (HTTP polling every 3s). All other providers use true WebSocket relay via `stt-ws-relay`.
 
+### 3. Soniox uses auto-fallback endpoint strategy
+The relay tries `wss://stt-rt.soniox.com/transcribe-websocket` (current API) first with a 3-second timeout, then falls back to `wss://api.soniox.com/transcribe-websocket` (legacy). As of Feb 2026, the current API connects successfully from Supabase Deno edge functions.
+
+### 4. Supabase MCP server not configured
+The Supabase MCP server requires `SUPABASE_ACCESS_TOKEN` to be set. Currently not configured, so edge function logs and management must be done via the Supabase CLI or dashboard. Deploy edge functions with: `supabase functions deploy <name> --no-verify-jwt`. The Supabase CLI is installed and authenticated — direct CLI deploy works without MCP.
+
+---
+
+## WebSocket lifecycle (useRealtimeProvider)
+
+**Language/provider switching**: When `language` or `providerId` changes, `connectWs` is recreated via `useCallback` deps → the main `useEffect` re-runs. The hook must:
+1. Null out `onmessage`/`onclose`/`onerror` on the old WS before closing (prevents stale handlers firing into new state)
+2. Close the old WS with code 1000
+3. Reset all state (`transcript`, `latencyMs`, `error`, `wordCount`, `rawMessages`, `pendingAudioRef`, `chunkCountRef`)
+4. Open a new WS
+
+**Status lifecycle**: `idle` → `connecting` (on WS open) → `live` (on `relay_ready` from relay) → `done`/`error` (on close/error)
+
+**Raw messages**: All string messages from the relay are captured in `rawMessages` state (capped at 200). Available via expandable "Raw (N)" panel in TranscriptionPanel for debugging provider responses.
+
+---
+
+## Session auto-save (Arena.tsx)
+
+When recording stops, a `useEffect` watches all provider statuses. Once all active providers have settled (`idle`/`done`/`error`), it writes to `sessions` + `session_results` tables. An 8-second safety timeout forces save if any provider hangs. Requires authenticated user. Toast confirms save.
+
 ---
 
 ## Context state
@@ -282,3 +326,47 @@ Whisper has no WebSocket endpoint, so it falls back to `stt-realtime` (HTTP poll
 4. Add `case "newprovider"` to `stt-async/index.ts` → `transcribeWithProvider()`
 5. Add `case "newprovider"` to `manage-api-keys/index.ts` → `testProviderKey()`
 6. Add provider ID to `ALLOWED_PROVIDERS` in all relevant edge functions
+7. Add response parser `case` to `parseProviderMessage()` in `src/hooks/useRealtimeProvider.ts` — set `mode: "replace"` if provider sends cumulative full-stream messages (like Soniox), `"replace_partial"` if cumulative per-utterance (like ElevenLabs), `"append"` if incremental
+
+---
+
+## Soniox integration details
+
+Soniox has **two** WebSocket API versions. The relay (`stt-ws-relay`) tries the current API first, falls back to legacy automatically via `connectSonioxUpstream()`.
+
+### Current API (`stt-rt.soniox.com`) — primary
+- **Endpoint**: `wss://stt-rt.soniox.com/transcribe-websocket`
+- **Init fields**: `api_key`, `model` (`"stt-rt-preview"`), `audio_format` (`"pcm_s16le"`), `sample_rate` (16000), `num_channels` (1), `language_hints` (array)
+- **Response format**: `{ tokens: [{ text, is_final, start_ms, end_ms, confidence, speaker }], final_audio_proc_ms, total_audio_proc_ms, finished }`
+- **End signal**: Send empty string `""`
+- **Status**: Reachable from Supabase Deno edge functions as of Feb 2026
+
+### Legacy API (`api.soniox.com`) — fallback
+- **Endpoint**: `wss://api.soniox.com/transcribe-websocket`
+- **Init fields**: `api_key`, `sample_rate_hertz`, `num_audio_channels`, `language_code`
+- **NO** `model`, `audio_format`, `sample_rate`, `num_channels` (these cause `Cannot find field` errors)
+- **Response format**: `{ fw: [...], nfw: [...], fpt: number, tpt: number, spks: [...] }`
+- **End signal**: Send empty buffer `Uint8Array(0)`
+
+### Critical: Soniox sends cumulative token arrays
+**Both API versions send ALL tokens from the beginning of the stream in every message**, not just new tokens. The client-side parser returns `mode: "replace"` for Soniox, and the `onmessage` handler replaces the entire transcript (not appends). Word count is set absolutely, not incremented. **Appending Soniox messages causes massive duplication.**
+
+### Client-side parser (`useRealtimeProvider.ts`)
+`parseProviderMessage` returns `{ text, isFinal, mode }` where `mode` is:
+- `"replace"` for Soniox (cumulative full-stream tokens) — entire transcript is replaced each message
+- `"replace_partial"` for ElevenLabs (cumulative per-utterance) — replaces last non-final entry, keeps committed entries
+- `"append"` for Gemini, Google, Whisper (incremental) — transcript is appended
+
+Handles both Soniox formats:
+- Current API: reads `msg.tokens[].text` and `msg.tokens[].is_final`
+- Legacy API: reads `msg.fw` and `msg.nfw` arrays, extracts `w.t` or `w.text`
+
+### Soniox async (`stt-async`)
+Uses REST endpoint `https://api.soniox.com/v1/transcribe` with `Authorization: Bearer <key>` and multipart form upload. Returns `{ text }` or `{ transcript }`.
+
+### Key learnings
+- `stt-rt.soniox.com` was previously unreachable from Supabase Deno but now works (Feb 2026). The relay still has auto-fallback to `api.soniox.com` as insurance.
+- Mixing field names across API versions causes silent failures or `Cannot find field` errors
+- Audio buffering is critical at TWO levels: relay-side (`audioQueue`) and client-side (`pendingAudioRef`). Without either, packets are silently dropped during connection setup. The relay adds a 150ms delay between Soniox init and queue flush to allow init processing.
+- Soniox requires a proper finalize protocol — sending the end signal then immediately closing the upstream WS loses all final tokens. Must wait for `finished: true` (or timeout).
+- Soniox cumulative token responses MUST replace (not append) transcript state, or the UI shows massive word duplication.
