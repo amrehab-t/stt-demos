@@ -8,7 +8,9 @@ interface UseRealtimeProviderOptions {
   enabled: boolean;
 }
 
-const WS_PROVIDERS = ["elevenlabs", "gemini", "google", "soniox"];
+// google is intentionally excluded: standard WebSocket can't send Authorization headers,
+// and Google STT requires OAuth2. Google uses HTTP polling (same as Whisper).
+const WS_PROVIDERS = ["elevenlabs", "gemini", "soniox"];
 const CHUNK_INTERVAL_MS = 3000;
 const SONIOX_FINALIZE_TIMEOUT_MS = 5000;
 
@@ -34,13 +36,17 @@ function parseProviderMessage(providerId: string, raw: string): ParsedMessage | 
         return text ? { text, isFinal: msg.message_type === "committed_transcript", mode: "replace_partial" } : null;
       }
       case "gemini": {
-        const text = msg.serverContent?.modelTurn?.parts?.[0]?.text ?? "";
+        // Native audio model may return transcript via inputAudioTranscription OR modelTurn
+        const modelText = msg.serverContent?.modelTurn?.parts?.[0]?.text ?? "";
+        const inputText = msg.serverContent?.inputTranscription?.text ?? "";
+        const text = modelText || inputText;
         return text ? { text, isFinal: true, mode: "append" } : null;
       }
       case "google": {
+        // Google STT sends cumulative per-utterance: same utterance revised until isFinal
         const result = msg.results?.[0];
         const text = result?.alternatives?.[0]?.transcript ?? "";
-        return text ? { text, isFinal: result?.isFinal ?? false, mode: "append" } : null;
+        return text ? { text, isFinal: result?.isFinal ?? false, mode: "replace_partial" } : null;
       }
       case "soniox": {
         // Current API: cumulative { tokens: [...] } — each message has ALL tokens

@@ -1,6 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const ALLOWED_PROVIDERS = ["elevenlabs", "gemini", "google", "soniox"];
+const ALLOWED_PROVIDERS = ["elevenlabs", "gemini", "gemini3", "google", "soniox"];
 const LANGUAGE_REGEX = /^[a-z]{2}(-[A-Z]{2})?$|^auto$/;
 const SONIOX_FINALIZE_TIMEOUT_MS = 5000;
 
@@ -108,9 +108,10 @@ function buildInitMessage(providerId: string, apiKey: string, language: string, 
     case "gemini":
       return JSON.stringify({
         setup: {
-          model: "models/gemini-2.0-flash-exp",
-          generation_config: { response_modalities: ["TEXT"] },
-          system_instruction: {
+          model: "models/gemini-live-2.5-flash-native-audio",
+          generationConfig: { responseModalities: ["TEXT"] },
+          inputAudioTranscription: {},
+          systemInstruction: {
             parts: [{ text: language === "auto"
               ? "You are a speech-to-text transcription engine. Transcribe all audio you receive to text, auto-detecting the language. Return only the transcription text."
               : `You are a speech-to-text transcription engine. Transcribe all audio you receive to text in ${language}. Return only the transcription text.` }],
@@ -391,10 +392,18 @@ Deno.serve(async (req) => {
 
     // ── Non-Soniox providers: set up onopen (Soniox already handled above) ─
     if (providerId !== "soniox") {
-      upstreamWs.onopen = () => {
+      upstreamWs.onopen = async () => {
         console.log(`[stt-ws-relay] upstream open (${providerId})`);
         const initMsg = buildInitMessage(providerId, apiKey, safeLanguage);
-        if (initMsg) upstreamWs.send(initMsg);
+        if (initMsg) {
+          upstreamWs.send(initMsg);
+          // Gemini's native audio model needs time to process the setup message
+          // before it can accept audio — same behaviour as Soniox
+          if (providerId === "gemini" && audioQueue.length > 0) {
+            console.log(`[stt-ws-relay] gemini: waiting 150ms for setup to process before flushing ${audioQueue.length} buffered packets`);
+            await new Promise((resolve) => setTimeout(resolve, 150));
+          }
+        }
         upstreamReady = true;
 
         if (audioQueue.length > 0) {
@@ -480,10 +489,12 @@ Deno.serve(async (req) => {
         console.log(`[stt-ws-relay] audio #${audioPacketCount} (${providerId}), ${size}B`);
       }
 
-      if (providerId === "elevenlabs" && evt.data instanceof ArrayBuffer) {
+      if ((providerId === "elevenlabs" || providerId === "gemini") && evt.data instanceof ArrayBuffer) {
         const bytes = new Uint8Array(evt.data);
         const base64 = btoa(String.fromCharCode(...bytes));
-        const jsonMsg = JSON.stringify({ message_type: "input_audio_chunk", audio_base_64: base64 });
+        const jsonMsg = providerId === "elevenlabs"
+          ? JSON.stringify({ message_type: "input_audio_chunk", audio_base_64: base64 })
+          : JSON.stringify({ realtimeInput: { mediaChunks: [{ mimeType: "audio/pcm;rate=16000", data: base64 }] } });
         if (upstreamWs.readyState === WebSocket.OPEN) {
           upstreamWs.send(jsonMsg);
         } else {

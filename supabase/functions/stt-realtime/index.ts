@@ -1,6 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const ALLOWED_PROVIDERS = ["elevenlabs", "gemini", "google", "soniox", "whisper"];
+const ALLOWED_PROVIDERS = ["elevenlabs", "gemini", "gemini3", "google", "soniox", "whisper"];
 const MAX_AUDIO_SIZE = 5_000_000; // ~3.3MB base64 per chunk
 const LANGUAGE_REGEX = /^[a-z]{2}(-[A-Z]{2})?$|^auto$/;
 
@@ -14,6 +14,66 @@ function toIso3(lang: string): string {
 }
 
 const ENCRYPTION_KEY = () => Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+/** Base64url encode a string or Uint8Array */
+function base64url(input: string | Uint8Array): string {
+  const bytes = typeof input === "string" ? new TextEncoder().encode(input) : input;
+  const binary = String.fromCharCode(...bytes);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+}
+
+/**
+ * Exchange a Google service account JSON key for a short-lived OAuth2 access token.
+ * Uses Deno's built-in crypto.subtle for RS256 JWT signing.
+ * The returned token is valid for 1 hour.
+ */
+async function getGoogleAccessToken(serviceAccountJson: string): Promise<string> {
+  const sa = JSON.parse(serviceAccountJson);
+  const now = Math.floor(Date.now() / 1000);
+
+  const headerB64 = base64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const payloadB64 = base64url(JSON.stringify({
+    iss: sa.client_email,
+    scope: "https://www.googleapis.com/auth/cloud-platform",
+    aud: "https://oauth2.googleapis.com/token",
+    iat: now,
+    exp: now + 3600,
+  }));
+  const signingInput = `${headerB64}.${payloadB64}`;
+
+  // Import PKCS8 PEM private key
+  const pemBody = sa.private_key
+    .replace(/-----BEGIN PRIVATE KEY-----/g, "")
+    .replace(/-----END PRIVATE KEY-----/g, "")
+    .replace(/\s/g, "");
+  const keyBytes = Uint8Array.from(atob(pemBody), (c) => c.charCodeAt(0));
+  const cryptoKey = await crypto.subtle.importKey(
+    "pkcs8",
+    keyBytes,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+
+  const signature = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    cryptoKey,
+    new TextEncoder().encode(signingInput)
+  );
+  const sigB64 = base64url(new Uint8Array(signature));
+  const jwt = `${signingInput}.${sigB64}`;
+
+  const resp = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
+  });
+  const data = await resp.json();
+  if (!data.access_token) {
+    throw new Error(`Google OAuth2 token exchange failed: ${data.error ?? JSON.stringify(data)}`);
+  }
+  return data.access_token;
+}
 
 function getAdminClient() {
   return createClient(
@@ -140,8 +200,10 @@ async function handleRestChunked(
       transcript = data.text || "";
       if (!res.ok) error = `Provider returned HTTP ${res.status}`;
     } else if (providerId === "gemini") {
+      // Use WAV bytes to properly pair with audio/wav MIME type
+      const wavBase64 = btoa(String.fromCharCode(...wavBytes));
       const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -151,7 +213,29 @@ async function handleRestChunked(
                 { text: language === "auto"
                   ? "Transcribe this audio to text, auto-detecting the language. Return ONLY the transcription text, nothing else."
                   : `Transcribe this audio to text in ${language}. Return ONLY the transcription text, nothing else.` },
-                { inline_data: { mime_type: "audio/wav", data: audioBase64 } },
+                { inline_data: { mime_type: "audio/wav", data: wavBase64 } },
+              ],
+            }],
+          }),
+        }
+      );
+      const data = await res.json();
+      transcript = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      if (!res.ok) error = `Provider returned HTTP ${res.status}`;
+    } else if (providerId === "gemini3") {
+      const wavBase64 = btoa(String.fromCharCode(...wavBytes));
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { text: language === "auto"
+                  ? "Transcribe this audio to text, auto-detecting the language. Return ONLY the transcription text, nothing else."
+                  : `Transcribe this audio to text in ${language}. Return ONLY the transcription text, nothing else.` },
+                { inline_data: { mime_type: "audio/wav", data: wavBase64 } },
               ],
             }],
           }),
@@ -161,17 +245,30 @@ async function handleRestChunked(
       transcript = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
       if (!res.ok) error = `Provider returned HTTP ${res.status}`;
     } else if (providerId === "google") {
+      // apiKey is a service account JSON — exchange for a short-lived OAuth2 access token
+      let accessToken: string;
+      try {
+        accessToken = await getGoogleAccessToken(apiKey);
+      } catch (e) {
+        error = `Google auth failed: ${(e as Error).message}`;
+        return new Response(
+          JSON.stringify({ transcript: "", error, isFinal: true }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
       const res = await fetch("https://speech.googleapis.com/v1/speech:recognize", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
+          Authorization: `Bearer ${accessToken}`,
         },
         body: JSON.stringify({
           config: {
             encoding: "LINEAR16",
             sampleRateHertz: 16000,
             languageCode: language === "auto" ? "en-US" : (language || "en-US"),
+            enableAutomaticPunctuation: true,
           },
           audio: { content: audioBase64 },
         }),

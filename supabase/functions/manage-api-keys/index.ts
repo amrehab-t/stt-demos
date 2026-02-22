@@ -1,6 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const ALLOWED_PROVIDERS = ["elevenlabs", "gemini", "google", "soniox", "whisper"];
+const ALLOWED_PROVIDERS = ["elevenlabs", "gemini", "gemini3", "google", "soniox", "whisper"];
 const ALLOWED_ACTIONS = ["test"];
 const MAX_API_KEY_LENGTH = 10000;
 
@@ -80,7 +80,9 @@ async function testProviderKey(providerId: string, apiKey: string): Promise<{ va
         });
         return res.ok ? { valid: true } : { valid: false, error: `HTTP ${res.status}` };
       }
-      case "gemini": {
+      case "gemini":
+      case "gemini3": {
+        // Both use the same Gemini API key from Google AI Studio
         const res = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`
         );

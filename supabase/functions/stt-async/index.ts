@@ -1,6 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const ALLOWED_PROVIDERS = ["elevenlabs", "gemini", "google", "soniox", "whisper"];
+const ALLOWED_PROVIDERS = ["elevenlabs", "gemini", "gemini3", "google", "soniox", "whisper"];
 const MAX_AUDIO_SIZE = 15_000_000; // ~10MB base64
 const LANGUAGE_REGEX = /^[a-z]{2}(-[A-Z]{2})?$|^auto$/;
 const MIME_TYPE_REGEX = /^audio\/[a-z0-9.+-]+$/;
@@ -15,6 +15,66 @@ function toIso3(lang: string): string {
 }
 
 const ENCRYPTION_KEY = () => Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+/** Base64url encode a string or Uint8Array */
+function base64url(input: string | Uint8Array): string {
+  const bytes = typeof input === "string" ? new TextEncoder().encode(input) : input;
+  const binary = String.fromCharCode(...bytes);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+}
+
+/**
+ * Exchange a Google service account JSON key for a short-lived OAuth2 access token.
+ * Uses Deno's built-in crypto.subtle for RS256 JWT signing.
+ * The returned token is valid for 1 hour.
+ */
+async function getGoogleAccessToken(serviceAccountJson: string): Promise<string> {
+  const sa = JSON.parse(serviceAccountJson);
+  const now = Math.floor(Date.now() / 1000);
+
+  const headerB64 = base64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const payloadB64 = base64url(JSON.stringify({
+    iss: sa.client_email,
+    scope: "https://www.googleapis.com/auth/cloud-platform",
+    aud: "https://oauth2.googleapis.com/token",
+    iat: now,
+    exp: now + 3600,
+  }));
+  const signingInput = `${headerB64}.${payloadB64}`;
+
+  // Import PKCS8 PEM private key
+  const pemBody = sa.private_key
+    .replace(/-----BEGIN PRIVATE KEY-----/g, "")
+    .replace(/-----END PRIVATE KEY-----/g, "")
+    .replace(/\s/g, "");
+  const keyBytes = Uint8Array.from(atob(pemBody), (c) => c.charCodeAt(0));
+  const cryptoKey = await crypto.subtle.importKey(
+    "pkcs8",
+    keyBytes,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+
+  const signature = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    cryptoKey,
+    new TextEncoder().encode(signingInput)
+  );
+  const sigB64 = base64url(new Uint8Array(signature));
+  const jwt = `${signingInput}.${sigB64}`;
+
+  const resp = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
+  });
+  const data = await resp.json();
+  if (!data.access_token) {
+    throw new Error(`Google OAuth2 token exchange failed: ${data.error ?? JSON.stringify(data)}`);
+  }
+  return data.access_token;
+}
 
 function getAdminClient() {
   return createClient(
@@ -94,7 +154,33 @@ async function transcribeWithProvider(
 
       case "gemini": {
         const res = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{
+                parts: [
+                  { text: language === "auto"
+                    ? "Transcribe this audio to text, auto-detecting the language. Return ONLY the transcription text, nothing else."
+                    : `Transcribe this audio to text in ${language}. Return ONLY the transcription text, nothing else.` },
+                  { inline_data: { mime_type: mimeType || "audio/wav", data: audioBase64 } },
+                ],
+              }],
+            }),
+          }
+        );
+        const data = await res.json();
+        if (!res.ok) {
+          return { transcript: "", processingTimeMs: Date.now() - start, wordCount: 0, error: `Provider returned HTTP ${res.status}` };
+        }
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+        return { transcript: text, processingTimeMs: Date.now() - start, wordCount: text.split(/\s+/).filter(Boolean).length };
+      }
+
+      case "gemini3": {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -119,10 +205,13 @@ async function transcribeWithProvider(
       }
 
       case "google": {
-        let accessToken = apiKey;
+        // apiKey is a service account JSON — exchange for a short-lived OAuth2 access token
+        let accessToken: string;
         try {
-          JSON.parse(apiKey);
-        } catch {}
+          accessToken = await getGoogleAccessToken(apiKey);
+        } catch (e) {
+          return { transcript: "", processingTimeMs: Date.now() - start, wordCount: 0, error: `Google auth failed: ${(e as Error).message}` };
+        }
 
         const res = await fetch("https://speech.googleapis.com/v1/speech:recognize", {
           method: "POST",
