@@ -25,3 +25,6 @@ dist-ssr
 
 # Supabase CLI cache
 supabase/.temp/
+
+# MCP config (contains secrets)
+.mcp.json

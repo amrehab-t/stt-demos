@@ -65,11 +65,10 @@ async function getUser(req: Request) {
     { global: { headers: { Authorization: authHeader } } }
   );
 
-  const token = authHeader.replace("Bearer ", "");
-  const { data, error } = await supabase.auth.getClaims(token);
-  if (error || !data?.claims) return null;
+  const { data: { user }, error } = await supabase.auth.getUser();
+  if (error || !user) return null;
 
-  return { userId: data.claims.sub as string, supabase };
+  return { userId: user.id, supabase };
 }
 
 async function testProviderKey(providerId: string, apiKey: string): Promise<{ valid: boolean; error?: string }> {
@@ -171,14 +170,14 @@ Deno.serve(async (req) => {
       if (action === "test") {
         let keyToTest = api_key;
         if (!keyToTest) {
-          // Fetch encrypted key and decrypt it
-          const { data } = await supabase
+          // Fetch encrypted key using admin client (bypasses RLS) and decrypt it
+          const { data, error: fetchErr } = await adminClient
             .from("api_keys")
             .select("encrypted_key")
             .eq("user_id", userId)
             .eq("provider_id", provider_id)
             .single();
-          if (!data) {
+          if (fetchErr || !data) {
             return new Response(JSON.stringify({ valid: false, error: "No key saved" }), {
               headers: { ...corsHeaders, "Content-Type": "application/json" },
             });
@@ -189,13 +188,13 @@ Deno.serve(async (req) => {
         const result = await testProviderKey(provider_id, keyToTest);
 
         if (!api_key && result.valid) {
-          await supabase
+          await adminClient
             .from("api_keys")
             .update({ status: "configured" })
             .eq("user_id", userId)
             .eq("provider_id", provider_id);
         } else if (!api_key && !result.valid) {
-          await supabase
+          await adminClient
             .from("api_keys")
             .update({ status: "invalid" })
             .eq("user_id", userId)
@@ -224,7 +223,8 @@ Deno.serve(async (req) => {
 
       const encryptedApiKey = await encryptKey(adminClient, api_key);
 
-      const { data: existing } = await supabase
+      // Use admin client for upsert to bypass RLS issues with encrypted_key column
+      const { data: existing } = await adminClient
         .from("api_keys")
         .select("id")
         .eq("user_id", userId)
@@ -232,7 +232,7 @@ Deno.serve(async (req) => {
         .single();
 
       if (existing) {
-        const { error } = await supabase
+        const { error } = await adminClient
           .from("api_keys")
           .update({
             encrypted_key: encryptedApiKey,
@@ -242,7 +242,7 @@ Deno.serve(async (req) => {
           .eq("id", existing.id);
         if (error) throw error;
       } else {
-        const { error } = await supabase.from("api_keys").insert({
+        const { error } = await adminClient.from("api_keys").insert({
           user_id: userId,
           provider_id,
           encrypted_key: encryptedApiKey,
@@ -267,7 +267,7 @@ Deno.serve(async (req) => {
         });
       }
 
-      const { error } = await supabase
+      const { error } = await adminClient
         .from("api_keys")
         .delete()
         .eq("user_id", userId)

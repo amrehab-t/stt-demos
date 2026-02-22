@@ -73,7 +73,6 @@ function buildInitMessage(providerId: string, apiKey: string, language: string):
       return JSON.stringify({
         api_key: apiKey,
         language_code: language || "en",
-        model: "nova-2",
       });
     case "google":
       return JSON.stringify({
@@ -145,13 +144,14 @@ Deno.serve(async (req) => {
     });
   }
 
-  const supabase = createClient(
+  // Authenticate the user via their token
+  const authClient = createClient(
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_ANON_KEY")!,
     { global: { headers: { Authorization: `Bearer ${token}` } } }
   );
 
-  const { data: { user }, error: userError } = await supabase.auth.getUser();
+  const { data: { user }, error: userError } = await authClient.auth.getUser();
   if (userError || !user) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401,
@@ -159,25 +159,28 @@ Deno.serve(async (req) => {
     });
   }
 
-  const { data: keyData } = await supabase
+  // Use admin client to fetch encrypted key (bypasses RLS)
+  const adminClient = getAdminClient();
+
+  const { data: keyData, error: keyError } = await adminClient
     .from("api_keys")
     .select("encrypted_key")
     .eq("user_id", user.id)
     .eq("provider_id", providerId)
     .single();
 
-  if (!keyData) {
+  if (keyError || !keyData) {
     return new Response(
       JSON.stringify({ error: "No API key configured for this provider. Add it in Settings." }),
       { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
 
-  const adminClient = getAdminClient();
   let apiKey: string;
   try {
     apiKey = await decryptKey(adminClient, keyData.encrypted_key);
-  } catch {
+  } catch (e) {
+    console.error(`[stt-ws-relay] decrypt error (${providerId}):`, e);
     return new Response(JSON.stringify({ error: "Failed to retrieve API key" }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -190,7 +193,10 @@ Deno.serve(async (req) => {
     let upstreamWs: WebSocket;
     try {
       const upstreamUrl = buildUpstreamUrl(providerId, apiKey, safeLanguage);
-      upstreamWs = new WebSocket(upstreamUrl);
+      const upstreamHeaders = buildUpstreamHeaders(providerId, apiKey);
+      upstreamWs = Object.keys(upstreamHeaders).length > 0
+        ? new WebSocket(upstreamUrl, { headers: upstreamHeaders } as any)
+        : new WebSocket(upstreamUrl);
     } catch (e) {
       clientWs.close(1011, "Failed to connect to provider");
       return;
