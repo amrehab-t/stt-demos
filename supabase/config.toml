@@ -1,0 +1,16 @@
+project_id = "wcgueplbxwxpfvupnpqa"
+
+[functions.manage-api-keys]
+verify_jwt = false
+
+[functions.stt-realtime]
+verify_jwt = false
+
+[functions.stt-async]
+verify_jwt = false
+
+[functions.check-user-status]
+verify_jwt = false
+
+[functions.admin-users]
+verify_jwt = false
