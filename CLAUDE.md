@@ -39,8 +39,8 @@ npm run test:watch   # Vitest watch mode
 Stored in `.env` (committed — contains only the anon/public key, not secrets):
 
 ```
-VITE_SUPABASE_PROJECT_ID=wcgueplbxwxpfvupnpqa
-VITE_SUPABASE_URL=https://wcgueplbxwxpfvupnpqa.supabase.co
+VITE_SUPABASE_PROJECT_ID=fnjotsnlywzxrcaevayk
+VITE_SUPABASE_URL=https://fnjotsnlywzxrcaevayk.supabase.co
 VITE_SUPABASE_PUBLISHABLE_KEY=<anon key>
 ```
 
@@ -82,7 +82,7 @@ src/
 
   hooks/
     useAudioCapture.ts           # Mic access + PCM 16-bit 16kHz conversion
-    useRealtimeProvider.ts       # Polls stt-realtime edge function every 3s (pseudo-realtime)
+    useRealtimeProvider.ts       # WebSocket relay for WS providers, HTTP fallback for Whisper
     useAsyncProvider.ts          # Sends file to stt-async edge function
     useApiKeys.ts                # CRUD for API keys via manage-api-keys edge function
     use-toast.ts                 # Toast hook
@@ -105,7 +105,8 @@ supabase/
   config.toml                   # Supabase local config
   functions/
     manage-api-keys/index.ts    # GET/POST/DELETE API keys (encrypt/decrypt with pgcrypto)
-    stt-realtime/index.ts       # REST-based chunked transcription (NOT true WebSocket)
+    stt-realtime/index.ts       # REST-based chunked transcription (HTTP fallback for Whisper)
+    stt-ws-relay/index.ts       # True WebSocket relay for ElevenLabs, Gemini, Google, Soniox
     stt-async/index.ts          # Full file transcription
     check-user-status/index.ts  # Returns approved + role for current user
     admin-users/index.ts        # Admin: list users, approve/reject
@@ -167,8 +168,8 @@ All tables have RLS enabled. Encryption key = `SUPABASE_SERVICE_ROLE_KEY` (used 
 ## Edge functions
 
 All functions enforce:
-- CORS: only `*.lovable.app` origins (hardcoded — **needs updating** for non-Lovable deployments)
-- Auth: Bearer token validated against Supabase
+- CORS: `localhost`, `127.0.0.1`, `*.lovable.app`, `*.supabase.co`
+- Auth: Bearer token validated via `supabase.auth.getUser()`
 - Input validation on all fields
 
 ### `manage-api-keys`
@@ -184,17 +185,20 @@ Test endpoints per provider:
 - Whisper: `GET /v1/models`
 
 ### `stt-realtime`
-Accepts `{ provider_id, language, audio: base64_pcm }`. Wraps PCM in a WAV header and calls the **async REST** endpoint — not a true WebSocket relay. See known issues below.
+HTTP fallback for Whisper (non-WebSocket provider). Accepts `{ provider_id, language, audio: base64_pcm }`. Wraps PCM in a WAV header and calls provider REST endpoints.
 
 Minimum audio size: 1600 bytes (silently returns empty transcript below this).
 Max audio size: 5MB base64.
+
+### `stt-ws-relay`
+True WebSocket relay for ElevenLabs, Gemini, Google, and Soniox. The client opens a WebSocket to this function, which authenticates, decrypts the user's API key, then opens an upstream WebSocket to the provider and relays frames bidirectionally.
+
+URL: `wss://<project>.supabase.co/functions/v1/stt-ws-relay?provider_id=...&language=...&token=...`
 
 ### `stt-async`
 Accepts `{ provider_id, language, audio: base64, file_name, mime_type }`.
 Max audio: 15MB base64 (~10MB file).
 Returns `{ transcript, processingTimeMs, wordCount, error? }`.
-
-Note: uses `supabase.auth.getClaims(token)` (not `getUser()`) — different auth pattern from `stt-realtime`.
 
 ### `check-user-status`
 Returns `{ approved, is_admin, roles, display_name }` for current user.
@@ -212,7 +216,7 @@ Admin-only. `GET` → all profiles with emails. `POST { user_id, action: "approv
 4. User approval status checked via `check-user-status` edge function
 
 Test credentials (auto-confirm enabled on this Supabase project):
-- Email: `test@sttarena.com` / Password: `TestArena123!`
+- Email: `test@stt.arena` / Password: (set during initial signup)
 
 ---
 
@@ -225,10 +229,12 @@ Mic → getUserMedia()
     → Float32 → PCM Int16 conversion
     → useAudioCapture.onAudioChunk(ArrayBuffer)
         → broadcast to all 4 useRealtimeProvider instances
-            → buffer accumulation (3s window)
-            → base64 encode
-            → POST stt-realtime edge function
-            → update transcript state
+            → WebSocket providers (elevenlabs, gemini, google, soniox):
+                → WebSocket to stt-ws-relay edge function
+                → relay upstream to provider WSS endpoint
+            → HTTP providers (whisper):
+                → buffer accumulation (3s window)
+                → base64 encode → POST stt-realtime edge function
 ```
 
 `useAudioCapture` uses `ScriptProcessorNode` (deprecated but broadly compatible). An AudioWorklet would be better but adds complexity.
@@ -237,25 +243,11 @@ Mic → getUserMedia()
 
 ## Known issues / technical debt
 
-### 1. Real-time is fake (pseudo-realtime)
-`useRealtimeProvider.ts` accumulates PCM for 3 seconds then sends a batch HTTP POST to `stt-realtime`. It does **not** open a WebSocket. The `realtimeEndpoint` URLs in `providers.ts` are registered but never used.
+### 1. Google Cloud STT uses Bearer token directly
+The async and realtime functions pass the raw API key as a Bearer token. Google Cloud actually requires OAuth2 or a service account JWT — not an API key. The manage-api-keys test validates JSON structure only.
 
-**Plan**: `stt-realtime` should accept a WebSocket upgrade, open a persistent connection to the provider's WSS endpoint, and relay frames bidirectionally.
-
-### 2. ElevenLabs language code mapping is broken
-`stt-realtime/index.ts:99` and `stt-async/index.ts:65`: only maps `"en"` → `"eng"`. ElevenLabs Scribe v2 requires ISO 639-3 codes (`spa`, `fra`, `deu`, etc.). All other languages are passed raw (ISO 639-1) and will fail.
-
-### 3. Soniox missing from `stt-realtime`
-`stt-realtime/index.ts` has no `case "soniox"` — falls through to `error = "Unsupported provider"` even though it's in `ALLOWED_PROVIDERS`.
-
-### 4. CORS hardcoded to `.lovable.app`
-All edge functions check `origin.endsWith(".lovable.app")`. Running from `localhost` or any other domain will hit the CORS fallback. Update `isAllowedOrigin()` in each function for local dev or custom domains.
-
-### 5. Google Cloud STT uses Bearer token directly
-The async function passes the raw API key as a Bearer token. Google Cloud actually requires OAuth2 or a service account JWT — not an API key. The manage-api-keys test validates JSON structure only.
-
-### 6. `stt-async` uses `getClaims()`, `stt-realtime` uses `getUser()`
-Inconsistent auth patterns across edge functions.
+### 2. Whisper uses HTTP fallback only
+Whisper has no WebSocket endpoint, so it falls back to `stt-realtime` (HTTP polling every 3s). All other providers use true WebSocket relay via `stt-ws-relay`.
 
 ---
 
@@ -274,7 +266,7 @@ Inconsistent auth patterns across edge functions.
 
 - **Phase 1** ✅ — UI scaffolding, auth, provider registry, DB schema, placeholder pages
 - **Phase 2** ✅ — `manage-api-keys` edge function, Settings page wired
-- **Phase 3** ✅ (partial) — `useAudioCapture`, `stt-realtime` (pseudo), `useRealtimeProvider`, Arena wired. True WebSocket relay not implemented.
+- **Phase 3** ✅ — `useAudioCapture`, `stt-ws-relay` (true WebSocket), `stt-realtime` (HTTP fallback), `useRealtimeProvider`, Arena wired.
 - **Phase 4** ✅ — `stt-async`, `useAsyncProvider`, Batch page
 - **Phase 5** ✅ — History page
 - **Phase 6** — Benchmarks enhancements (live benchmark run, recharts bar chart, cost calculator)
@@ -285,7 +277,8 @@ Inconsistent auth patterns across edge functions.
 ## Adding a new STT provider
 
 1. Add entry to `PROVIDERS` array in `src/lib/providers.ts`
-2. Add `case "newprovider"` to `stt-realtime/index.ts` → `handleRestChunked()`
-3. Add `case "newprovider"` to `stt-async/index.ts` → `transcribeWithProvider()`
-4. Add `case "newprovider"` to `manage-api-keys/index.ts` → `testProviderKey()`
-5. Add provider ID to `ALLOWED_PROVIDERS` in all three edge functions
+2. If WebSocket-capable: add `case` to `stt-ws-relay/index.ts` (`buildUpstreamUrl`, `buildInitMessage`)
+3. If HTTP-only: add `case` to `stt-realtime/index.ts` → `handleRestChunked()`
+4. Add `case "newprovider"` to `stt-async/index.ts` → `transcribeWithProvider()`
+5. Add `case "newprovider"` to `manage-api-keys/index.ts` → `testProviderKey()`
+6. Add provider ID to `ALLOWED_PROVIDERS` in all relevant edge functions

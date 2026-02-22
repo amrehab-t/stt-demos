@@ -1,4 +1,4 @@
-project_id = "wcgueplbxwxpfvupnpqa"
+project_id = "fnjotsnlywzxrcaevayk"
 
 [functions.manage-api-keys]
 verify_jwt = false
@@ -13,4 +13,7 @@ verify_jwt = false
 verify_jwt = false
 
 [functions.admin-users]
+verify_jwt = false
+
+[functions.stt-ws-relay]
 verify_jwt = false
