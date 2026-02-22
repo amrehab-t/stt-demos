@@ -19,7 +19,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const [panelSelections, setPanelSelections] = useState<PanelSelections>([
     ...DEFAULT_PANEL_SELECTIONS,
   ]);
-  const [language, setLanguage] = useState("en");
+  const [language, setLanguage] = useState("auto");
 
   const resetSession = useCallback(() => {
     setPanelSelections([...DEFAULT_PANEL_SELECTIONS]);

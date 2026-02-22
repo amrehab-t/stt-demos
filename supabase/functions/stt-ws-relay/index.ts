@@ -45,8 +45,11 @@ async function decryptKey(adminClient: ReturnType<typeof getAdminClient>, encryp
 
 function buildUpstreamUrl(providerId: string, apiKey: string, language: string): string {
   switch (providerId) {
-    case "elevenlabs":
-      return `wss://api.elevenlabs.io/v1/speech-to-text/stream-input?xi-api-key=${encodeURIComponent(apiKey)}&model_id=scribe_v2&language_code=${toIso3(language)}`;
+    case "elevenlabs": {
+      // Token is injected dynamically after fetching a signed token
+      const langParam = language && language !== "auto" ? `&language_code=${language}` : "";
+      return `wss://api.elevenlabs.io/v1/speech-to-text/realtime?model_id=scribe_v2_realtime${langParam}`;
+    }
     case "gemini":
       return `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(apiKey)}`;
     case "google":
@@ -58,29 +61,25 @@ function buildUpstreamUrl(providerId: string, apiKey: string, language: string):
   }
 }
 
-function buildUpstreamHeaders(providerId: string, apiKey: string): Record<string, string> {
-  switch (providerId) {
-    case "google":
-      return { Authorization: `Bearer ${apiKey}` };
-    default:
-      return {};
-  }
-}
 
 function buildInitMessage(providerId: string, apiKey: string, language: string): string | null {
   switch (providerId) {
-    case "soniox":
-      return JSON.stringify({
+    case "soniox": {
+      const msg: Record<string, any> = {
         api_key: apiKey,
-        language_code: language || "en",
-      });
+        sample_rate_hertz: 16000,
+        audio_format: "pcm_s16le",
+      };
+      if (language && language !== "auto") msg.language_code = language;
+      return JSON.stringify(msg);
+    }
     case "google":
       return JSON.stringify({
         streamingConfig: {
           config: {
             encoding: "LINEAR16",
             sampleRateHertz: 16000,
-            languageCode: language || "en-US",
+            languageCode: language === "auto" ? "en-US" : (language || "en-US"),
             enableAutomaticPunctuation: true,
           },
           interimResults: true,
@@ -92,7 +91,9 @@ function buildInitMessage(providerId: string, apiKey: string, language: string):
           model: "models/gemini-2.0-flash-exp",
           generation_config: { response_modalities: ["TEXT"] },
           system_instruction: {
-            parts: [{ text: `You are a speech-to-text transcription engine. Transcribe all audio you receive to text in ${language || "en"}. Return only the transcription text.` }],
+            parts: [{ text: language === "auto"
+              ? "You are a speech-to-text transcription engine. Transcribe all audio you receive to text, auto-detecting the language. Return only the transcription text."
+              : `You are a speech-to-text transcription engine. Transcribe all audio you receive to text in ${language}. Return only the transcription text.` }],
           },
         },
       });
@@ -192,13 +193,31 @@ Deno.serve(async (req) => {
   clientWs.onopen = async () => {
     let upstreamWs: WebSocket;
     try {
-      const upstreamUrl = buildUpstreamUrl(providerId, apiKey, safeLanguage);
-      const upstreamHeaders = buildUpstreamHeaders(providerId, apiKey);
-      upstreamWs = Object.keys(upstreamHeaders).length > 0
-        ? new WebSocket(upstreamUrl, { headers: upstreamHeaders } as any)
-        : new WebSocket(upstreamUrl);
+      let upstreamUrl = buildUpstreamUrl(providerId, apiKey, safeLanguage);
+
+      // ElevenLabs requires a signed token for WS auth (no header support in Deno)
+      if (providerId === "elevenlabs") {
+        const tokenResp = await fetch("https://api.elevenlabs.io/v1/single-use-token/realtime_scribe", {
+          method: "POST",
+          headers: { "xi-api-key": apiKey },
+        });
+        if (!tokenResp.ok) {
+          const body = await tokenResp.text();
+          console.error(`[stt-ws-relay] ElevenLabs token fetch failed: ${tokenResp.status} ${body}`);
+          clientWs.send(JSON.stringify({ type: "relay_error", message: `ElevenLabs authentication failed (HTTP ${tokenResp.status}). Check your API key.` }));
+          clientWs.close(4000, "Failed to get ElevenLabs token");
+          return;
+        }
+        const { token: signedToken } = await tokenResp.json();
+        upstreamUrl += `&token=${encodeURIComponent(signedToken)}`;
+      }
+
+      console.log(`[stt-ws-relay] connecting upstream (${providerId}): ${upstreamUrl.split("?")[0]}`);
+      upstreamWs = new WebSocket(upstreamUrl);
     } catch (e) {
-      clientWs.close(1011, "Failed to connect to provider");
+      console.error(`[stt-ws-relay] upstream constructor threw (${providerId}):`, e);
+      clientWs.send(JSON.stringify({ type: "relay_error", message: "Failed to connect to provider. Please try again." }));
+      clientWs.close(4000, "Failed to connect to provider");
       return;
     }
 
@@ -208,24 +227,39 @@ Deno.serve(async (req) => {
     };
 
     upstreamWs.onmessage = (evt) => {
+      const preview = typeof evt.data === "string" ? evt.data.slice(0, 300) : `[binary ${(evt.data as ArrayBuffer).byteLength}B]`;
+      console.log(`[stt-ws-relay] upstream msg (${providerId}): ${preview}`);
       if (clientWs.readyState === WebSocket.OPEN) {
         clientWs.send(evt.data);
       }
     };
 
     upstreamWs.onerror = (e) => {
-      console.error(`[stt-ws-relay] upstream error (${providerId}):`, e);
-      clientWs.close(1011, "Upstream error");
+      console.error(`[stt-ws-relay] upstream error (${providerId}):`, JSON.stringify(e));
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(JSON.stringify({ type: "relay_error", message: "Failed to connect to provider. Check your API key and try again." }));
+      }
+      clientWs.close(4000, "Upstream error");
     };
 
     upstreamWs.onclose = (evt) => {
+      console.log(`[stt-ws-relay] upstream closed (${providerId}): code=${evt.code} reason="${evt.reason}" wasClean=${evt.wasClean}`);
       if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.close(evt.code, evt.reason);
+        if (evt.reason) {
+          clientWs.send(JSON.stringify({ type: "relay_error", message: evt.reason }));
+        }
+        const safeCode = evt.code === 1000 || (evt.code >= 3000 && evt.code <= 4999) ? evt.code : 4001;
+        clientWs.close(safeCode, evt.reason?.slice(0, 123) || "");
       }
     };
 
     clientWs.onmessage = (evt) => {
-      if (upstreamWs.readyState === WebSocket.OPEN) {
+      if (upstreamWs.readyState !== WebSocket.OPEN) return;
+      if (providerId === "elevenlabs" && evt.data instanceof ArrayBuffer) {
+        const bytes = new Uint8Array(evt.data);
+        const base64 = btoa(String.fromCharCode(...bytes));
+        upstreamWs.send(JSON.stringify({ message_type: "input_audio_chunk", audio_base_64: base64 }));
+      } else {
         upstreamWs.send(evt.data);
       }
     };
@@ -238,7 +272,7 @@ Deno.serve(async (req) => {
 
     clientWs.onerror = (e) => {
       console.error(`[stt-ws-relay] client error:`, e);
-      upstreamWs.close(1011, "Client error");
+      upstreamWs.close(4000, "Client error");
     };
   };
 

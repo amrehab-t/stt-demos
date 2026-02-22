@@ -110,7 +110,7 @@ async function handleRestChunked(
       const blob = new Blob([wavBytes], { type: "audio/wav" });
       formData.append("file", blob, "audio.wav");
       formData.append("model_id", "scribe_v2");
-      formData.append("language_code", toIso3(language));
+      if (language && language !== "auto") formData.append("language_code", toIso3(language));
 
       const res = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
         method: "POST",
@@ -129,7 +129,7 @@ async function handleRestChunked(
       const blob = new Blob([wavBytes], { type: "audio/wav" });
       formData.append("file", blob, "audio.wav");
       formData.append("model", "whisper-1");
-      formData.append("language", language || "en");
+      if (language && language !== "auto") formData.append("language", language);
 
       const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
         method: "POST",
@@ -148,7 +148,9 @@ async function handleRestChunked(
           body: JSON.stringify({
             contents: [{
               parts: [
-                { text: `Transcribe this audio to text. Language: ${language}. Return ONLY the transcription, nothing else.` },
+                { text: language === "auto"
+                  ? "Transcribe this audio to text, auto-detecting the language. Return ONLY the transcription text, nothing else."
+                  : `Transcribe this audio to text in ${language}. Return ONLY the transcription text, nothing else.` },
                 { inline_data: { mime_type: "audio/wav", data: audioBase64 } },
               ],
             }],
@@ -169,7 +171,7 @@ async function handleRestChunked(
           config: {
             encoding: "LINEAR16",
             sampleRateHertz: 16000,
-            languageCode: language || "en-US",
+            languageCode: language === "auto" ? "en-US" : (language || "en-US"),
           },
           audio: { content: audioBase64 },
         }),

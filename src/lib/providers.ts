@@ -15,6 +15,7 @@ export interface ProviderConfig {
   asyncEndpoint: string;
   asyncAuth: { type: string; headerName?: string };
   supportedLanguages: { code: string; name: string }[];
+  supportsAutoDetect: boolean;
   signupUrl: string;
   costPerMinute?: string;
   latencyRange?: string;
@@ -22,6 +23,7 @@ export interface ProviderConfig {
 }
 
 export const SUPPORTED_LANGUAGES = [
+  { code: "auto", name: "Auto (detect)" },
   { code: "en", name: "English" },
   { code: "es", name: "Spanish" },
   { code: "fr", name: "French" },
@@ -49,6 +51,7 @@ export const PROVIDERS: ProviderConfig[] = [
     asyncEndpoint: "https://api.elevenlabs.io/v1/speech-to-text",
     asyncAuth: { type: "header", headerName: "xi-api-key" },
     supportedLanguages: SUPPORTED_LANGUAGES.map((l) => ({ ...l })),
+    supportsAutoDetect: true,
     signupUrl: "https://elevenlabs.io/sign-up",
     costPerMinute: "$0.40",
     latencyRange: "~150ms",
@@ -65,6 +68,7 @@ export const PROVIDERS: ProviderConfig[] = [
     asyncEndpoint: "https://generativelanguage.googleapis.com/v1beta",
     asyncAuth: { type: "query-param" },
     supportedLanguages: SUPPORTED_LANGUAGES.map((l) => ({ ...l })),
+    supportsAutoDetect: true,
     signupUrl: "https://aistudio.google.com/apikey",
     costPerMinute: "$0.30",
     latencyRange: "~200ms",
@@ -81,6 +85,7 @@ export const PROVIDERS: ProviderConfig[] = [
     asyncEndpoint: "https://speech.googleapis.com/v1/speech:recognize",
     asyncAuth: { type: "bearer" },
     supportedLanguages: SUPPORTED_LANGUAGES.map((l) => ({ ...l })),
+    supportsAutoDetect: false,
     signupUrl: "https://console.cloud.google.com/speech",
     costPerMinute: "$0.36",
     latencyRange: "~250ms",
@@ -97,6 +102,7 @@ export const PROVIDERS: ProviderConfig[] = [
     asyncEndpoint: "https://api.soniox.com/transcribe",
     asyncAuth: { type: "header", headerName: "Authorization" },
     supportedLanguages: SUPPORTED_LANGUAGES.map((l) => ({ ...l })),
+    supportsAutoDetect: true,
     signupUrl: "https://soniox.com/signup",
     costPerMinute: "$0.35",
     latencyRange: "~300ms",
@@ -113,6 +119,7 @@ export const PROVIDERS: ProviderConfig[] = [
     asyncEndpoint: "https://api.openai.com/v1/audio/transcriptions",
     asyncAuth: { type: "bearer" },
     supportedLanguages: SUPPORTED_LANGUAGES.map((l) => ({ ...l })),
+    supportsAutoDetect: true,
     signupUrl: "https://platform.openai.com/signup",
     costPerMinute: "$0.10",
     latencyRange: "~500ms",

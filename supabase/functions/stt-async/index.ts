@@ -101,7 +101,9 @@ async function transcribeWithProvider(
             body: JSON.stringify({
               contents: [{
                 parts: [
-                  { text: `Transcribe this audio to text. Language: ${language || "auto-detect"}. Return ONLY the transcription text, nothing else.` },
+                  { text: language === "auto"
+                    ? "Transcribe this audio to text, auto-detecting the language. Return ONLY the transcription text, nothing else."
+                    : `Transcribe this audio to text in ${language}. Return ONLY the transcription text, nothing else.` },
                   { inline_data: { mime_type: mimeType || "audio/wav", data: audioBase64 } },
                 ],
               }],
@@ -132,7 +134,7 @@ async function transcribeWithProvider(
             config: {
               encoding: "LINEAR16",
               sampleRateHertz: 16000,
-              languageCode: language || "en-US",
+              languageCode: language === "auto" ? "en-US" : (language || "en-US"),
               enableAutomaticPunctuation: true,
             },
             audio: { content: audioBase64 },
@@ -167,7 +169,7 @@ async function transcribeWithProvider(
         const formData = new FormData();
         formData.append("file", new Blob([audioBytes], { type: mimeType }), fileName);
         formData.append("model", "whisper-1");
-        if (language) formData.append("language", language);
+        if (language && language !== "auto") formData.append("language", language);
 
         const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
           method: "POST",

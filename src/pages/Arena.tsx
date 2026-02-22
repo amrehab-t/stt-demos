@@ -27,13 +27,18 @@ const Arena = () => {
 
   const { start, stop, error: micError } = useAudioCapture({ onAudioChunk });
 
-  const handleStart = () => {
+  const handleStart = async () => {
+    console.log("[Arena] handleStart — panelSelections:", panelSelections, "language:", language);
     providers.forEach((p) => p.reset());
-    start();
-    setIsRecording(true);
+    const started = await start();
+    console.log("[Arena] mic started:", started);
+    if (started) {
+      setIsRecording(true);
+    }
   };
 
   const handleStop = () => {
+    console.log("[Arena] handleStop");
     stop();
     setIsRecording(false);
   };

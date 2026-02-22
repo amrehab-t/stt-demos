@@ -20,6 +20,9 @@ export function useAudioCapture({ sampleRate = 16000, onAudioChunk }: UseAudioCa
   const start = useCallback(async () => {
     try {
       setError(null);
+      console.log("[useAudioCapture] start() called");
+      console.log("[useAudioCapture] isSecureContext:", window.isSecureContext);
+      console.log("[useAudioCapture] navigator.mediaDevices:", navigator.mediaDevices);
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
@@ -52,12 +55,17 @@ export function useAudioCapture({ sampleRate = 16000, onAudioChunk }: UseAudioCa
       source.connect(processor);
       processor.connect(ctx.destination);
       setIsRecording(true);
+      console.log("[useAudioCapture] mic started, sampleRate:", ctx.sampleRate);
+      return true;
     } catch (e: any) {
+      console.error("[useAudioCapture] start() failed:", e);
       setError(e.message || "Microphone access denied");
+      return false;
     }
   }, [sampleRate]);
 
   const stop = useCallback(() => {
+    console.log("[useAudioCapture] stop() called");
     processorRef.current?.disconnect();
     processorRef.current = null;
     contextRef.current?.close();
